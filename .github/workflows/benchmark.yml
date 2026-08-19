@@ -1,11 +1,18 @@
-# Stub: run the nf-tools search benchmark and publish results to GitHub Pages.
+# Stub: build & publish the Synapse Portal Search Lab to GitHub Pages, optionally
+# re-running the nf-tools search benchmark first (off by default — the deploy doesn't
+# need it; the app benchmarks live, in-browser, against whatever the visitor picks).
 #
 # Queries hit the public Synapse repo-prod API anonymously (no secrets needed).
 # To enable: repo Settings → Pages → Build and deployment → Source = "GitHub Actions".
 name: benchmark
 
 on:
-  workflow_dispatch: {}  # manual trigger only
+  workflow_dispatch:
+    inputs:
+      run_benchmark:
+        description: 'Re-run the nf-tools golden-set benchmark before deploying'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -34,9 +41,10 @@ jobs:
         run: pip install pyyaml
 
       - name: Run benchmark
-        # Stub: single baseline run. Add more strategies/labels as needed.
-        # Non-fatal: if the run fails (or no benchmark exists yet), the build
-        # step below still publishes an "under construction" page.
+        # Off by default (see run_benchmark input) — a full golden-set run is dozens of
+        # live queries against prod and isn't needed just to deploy the site. Non-fatal:
+        # if it does run and fails, the build step below still publishes.
+        if: inputs.run_benchmark
         continue-on-error: true
         run: python3 benchmark/run.py tools --label baseline
 
