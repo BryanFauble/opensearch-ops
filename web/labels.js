@@ -69,6 +69,63 @@ export function strategyLabel(key) {
   return STRATEGY_LABELS[key] || { name: key, tag: key, blurb: "", bestFor: "" };
 }
 
+// Playground lever help — one line each, shown next to the lever inputs. Keyed by the
+// buildQuery() levers object's keys (see strategies.js).
+export const LEVER_HELP = {
+  type: "The query shape. Different shapes match, score, and rank very differently for the same words.",
+  field: "Which single column to query — required for the single-field types below the multi-field group (match/term/prefix/wildcard/fuzzy check exactly one field, not a boosted list). Pick from the suggested columns, or type any name that exists on the index — including a `.keyword` sub-field, for an unanalyzed exact match.",
+  operator: "OR (default): a doc matches if it contains any search term. AND: every term must be present — the fix for “tumor heterogeneity” pulling in every doc that mentions either word.",
+  fuzziness: "Tolerates typos/near-misses (edit distance). AUTO scales with term length. Off = exact spelling only.",
+  minimumShouldMatch: "How many of the search terms must match, e.g. “75%” or “2”. A softer middle ground between OR and AND.",
+  slop: "How far out of order/how many words apart phrase terms can be and still count as a match (0 = exact contiguous phrase).",
+  tieBreaker: "0–1. Blends in score from the non-best matching fields instead of only counting the single best field.",
+  caseInsensitive: "Ignore letter case when matching. Term/prefix/wildcard are exact-value matches by default, so “Syn123” won’t match “syn123” unless this is on.",
+};
+
+// Playground quick-select presets (see strategies.js PRESETS) — same {name, blurb, bestFor}
+// shape as STRATEGY_LABELS, shown in the same info tooltip.
+export const PRESET_LABELS = {
+  frontend_default: {
+    name: "Default site search",
+    blurb: "The front-end's built-in default query: searches every field, equal weight, with typo tolerance. No boosts.",
+    bestFor: "The baseline — what users get right now.",
+  },
+  simple_query_string: {
+    name: "Google-style",
+    blurb: "A forgiving query across the curated fields. Supports operators a user might type (+, -, quotes).",
+    bestFor: "A safe general-purpose default.",
+  },
+  best_fields: {
+    name: "Best field",
+    blurb: "Scores each result by its single best-matching field. Add boosts, an operator, or fuzziness with the levers below.",
+    bestFor: "General search where the strongest single signal should win.",
+  },
+  cross_fields_and: {
+    name: "Cross fields, AND",
+    blurb: "Treats the searched fields as one combined field so terms spread across several fields still match, and requires every term to be present.",
+    bestFor: "Multi-word queries like “tumor heterogeneity” that OR turns into a loose, oversized result set.",
+  },
+  best_fields_fuzzy: {
+    name: "Typo-tolerant",
+    blurb: "Best field matching plus fuzziness, so “schwan” still finds “Schwann”.",
+    bestFor: "Misspellings and near-misses (adds noise on identifier-heavy data).",
+  },
+  phrase_prefix: {
+    name: "As-you-type",
+    blurb: "Treats the last word as a prefix, like live typeahead (“neurofib…” matches “neurofibromin”).",
+    bestFor: "Autocomplete / as-you-type search boxes.",
+  },
+  exact_phrase: {
+    name: "Exact phrase",
+    blurb: "Matches the search terms as a literal contiguous phrase, in order. Slop 0 by default — the only result should be the exact thing.",
+    bestFor: "Known-item lookups: a synID, an exact title, a grant number.",
+  },
+};
+
+export function presetLabel(key) {
+  return PRESET_LABELS[key] || { name: key, blurb: "", bestFor: "" };
+}
+
 // Line icons for nf-tools resourceType values (the 9 types in the registry). Used only
 // for the nf-tools index; other indexes have their own (un-iconified) categories.
 const ICON = (inner) =>

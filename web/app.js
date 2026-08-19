@@ -1,14 +1,15 @@
-// Synapse Portal Search Lab — wiring for the playground (live side-by-side compare) and the
-// in-browser benchmark scoreboard. Works against ANY Synapse SearchIndex: curated tables
-// (e.g. nf-tools) ship a golden set + hand-tuned boosts in data/<table>.json; any other
-// index is loaded by synID, its schema discovered live, and its boosts auto-generated.
+// Synapse Portal Search Lab — wiring for the playground (two independent, fully
+// configurable search boxes side by side) and the in-browser benchmark scoreboard.
+// Works against ANY Synapse SearchIndex: curated tables (e.g. nf-tools) ship a golden
+// set + hand-tuned boosts in data/<table>.json; any other index is loaded by synID, its
+// schema discovered live, and its boosts auto-generated.
 // Logic/data mirror the Python harness (synapse.js / strategies.js / score.js).
 
 import { search, hitDict, hitId, indexName, indexColumns, listSearchIndexes } from "./synapse.js";
-import { STRATEGIES, STRATEGY_ORDER, BOOSTED_KEYS } from "./strategies.js";
+import { STRATEGIES, STRATEGY_ORDER, BOOSTED_KEYS, TYPES, PRESETS, PRESET_ORDER, LEVER_SUPPORT, buildQuery } from "./strategies.js";
 import { scoreCase, aggregate } from "./score.js";
 import { generateFieldBoosts } from "./boostgen.js";
-import { strategyLabel, METRIC_LABELS, toolTypeIcon } from "./labels.js";
+import { strategyLabel, presetLabel, LEVER_HELP, METRIC_LABELS, toolTypeIcon } from "./labels.js";
 
 // Shared SearchIndex collection project (children = every portal's index). See README.
 const PROJECT = "syn74909065";
@@ -21,14 +22,23 @@ const NAME_KEYS = ["resourceName", "name", "title", "studyName", "label"];
 const DESC_KEYS = ["description", "summary", "abstract", "overview"];
 const TYPE_KEYS = ["resourceType", "type", "studyStatus", "category"];
 
+const COL_KEYS = ["A", "B"];
+// B defaults to cross_fields+AND — the fix discussed for multi-word queries getting
+// diluted by OR — compared against the unmodified front-end baseline in A.
+const DEFAULT_PRESET = { A: "frontend_default", B: "cross_fields_and" };
+
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const pick = (d, keys) => { for (const k of keys) if (d[k]) return d[k]; return null; };
+const col = (key) => $(`.col[data-col="${key}"]`);
+const typeName = (key) => (TYPES.find((t) => t.key === key) || {}).name || key;
 
-let DATA = null;           // { index, index_name, k, id_field, fields, cases, precomputed, generated? }
-let BOOSTS = [];           // [{ field, boost }] editable, seeded from DATA.fields
-let LAST_BENCH = null;     // { strategies, per_case, k, live }
+let DATA = null;                 // { index, index_name, k, id_field, fields, cases, precomputed, generated? }
+const BOOSTS = { A: [], B: [] };       // [{ field, boost }] editable per column, seeded from DATA.fields
+const LEVERS = { A: {}, B: {} };       // { type, operator, fuzziness, minimumShouldMatch, slop, tieBreaker } per column
+const LAST_RESULT = { A: null, B: null }; // { hits, total } | { error } | null (hasn't searched yet)
+const LAST_DSL = { A: null, B: null };    // the exact searchQuery DSL object sent for the last search, per column
 
 // ---------------------------------------------------------------- bootstrap
 init().catch((e) => {
@@ -37,24 +47,19 @@ init().catch((e) => {
 
 async function init() {
   const manifest = await fetch("data/manifest.json").then((r) => (r.ok ? r.json() : { tables: [] })).catch(() => ({ tables: [] }));
-  // one-time wiring (independent of which index is loaded)
   setupTabs();
-  setupBoostCollapse();
-  setupBoostEditor();
   setupColumns();
-  setupSearch();
   setupBenchmarkControls();
   setupIndexSelector(manifest);
   if (manifest.generated_at) $("#genStamp").textContent = `Built ${manifest.generated_at}.`;
 
-  // load the default (first curated) table, else prompt for a custom index
   const first = (manifest.tables || [])[0];
   if (first) await loadTable(first.table);
   else { $("#indexPick").value = "custom"; $("#customWrap").hidden = false; setStatus("pick or paste a SearchIndex to begin"); }
 }
 
 const parseBoost = (f) => { const [field, w] = f.split("^"); return { field, boost: w ? Number(w) : 1 }; };
-const buildFields = () => BOOSTS.map(({ field, boost }) => (boost === 1 ? field : `${field}^${boost}`));
+const buildFields = (c) => BOOSTS[c].map(({ field, boost }) => (boost === 1 ? field : `${field}^${boost}`));
 const setStatus = (html, cls = "") => { const el = $("#indexStatus"); el.className = `inst-status ${cls}`; el.innerHTML = html; };
 
 // ---------------------------------------------------------------- index selector
@@ -63,7 +68,6 @@ function setupIndexSelector(manifest) {
   const curatedIds = new Set((manifest.tables || []).map((t) => t.index));
   const curatedOpts = (manifest.tables || []).map((t) =>
     `<option value="t:${esc(t.table)}">${esc(t.index_name || t.table)}</option>`).join("");
-  // curated tables first (loadable immediately), then a fallback to paste any ID
   sel.innerHTML =
     (curatedOpts ? `<optgroup label="Curated — with golden set">${curatedOpts}</optgroup>` : "") +
     `<option value="custom">Other SearchIndex by ID…</option>`;
@@ -79,8 +83,6 @@ function setupIndexSelector(manifest) {
   $("#loadCustom").addEventListener("click", go);
   $("#customId").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(); } });
 
-  // async: list every SearchIndex in the project and add the non-curated ones, so users
-  // can pick any portal's index without pasting an ID. Optional — paste-by-ID still works.
   listSearchIndexes(PROJECT).then((rows) => {
     const others = rows.filter((r) => !curatedIds.has(r.id));
     if (!others.length) return;
@@ -115,7 +117,6 @@ async function loadCustomIndex(synId, knownName = null) {
       index: synId, index_name: name, k: 10, id_field: "rowId",
       fields: generateFieldBoosts(columns), cases: [], precomputed: null, columns, generated: true,
     });
-    // reflect the load in the picker: select its option if listed, else fall back to "custom"
     const sel = $("#indexPick");
     const opt = sel.querySelector(`option[value="i:${synId}"]`);
     sel.value = opt ? `i:${synId}` : "custom";
@@ -124,36 +125,47 @@ async function loadCustomIndex(synId, knownName = null) {
   } finally { $("#loadCustom").disabled = false; }
 }
 
-// Real example queries from the index's own golden set beat generic placeholder text —
-// but not every index has one (auto-boosted indexes ship with cases: []).
 function updateSearchPlaceholder(data) {
   const examples = (data.cases || []).slice(0, 3).map((c) => c.query).filter(Boolean);
-  $("#q").placeholder = examples.length
+  const ph = examples.length
     ? `Search ${data.index_name} — e.g. ${examples.map((e) => `“${e}”`).join(", ")}…`
     : `Search ${data.index_name}…`;
+  $$(".col-q").forEach((el) => { el.placeholder = ph; });
 }
 
 // (re)render everything that depends on the loaded index
 function applyData(data) {
   DATA = data;
-  BOOSTS = (data.fields || []).map(parseBoost);
   const golden = data.cases.length ? `${data.cases.length} golden cases` : "no golden set";
-  // when we discovered all columns live, show boostable as a subset of the total so it's
-  // clear why the two numbers differ (non-text column types are excluded — see the
-  // "Which column types can be boosted?" note in the sidebar).
   const fields = data.columns
-    ? `${data.columns.length} columns (${BOOSTS.length} boostable)`
-    : `${BOOSTS.length} boostable fields`;
+    ? `${data.columns.length} columns (${(data.fields || []).length} boostable)`
+    : `${(data.fields || []).length} boostable fields`;
   const gen = data.generated ? ` · <span class="ok">auto-boosts</span>` : "";
   setStatus(`<span class="ok">${esc(data.index_name)}</span> · ${esc(data.index)} · ${fields} · ${golden}${gen}`);
   updateSearchPlaceholder(data);
   $("#sizeInput").value = data.k || 10;
-  renderBoostEditor();
-  // clear stale playground results from the previous index
-  $$(".col .results").forEach((ul) => { ul.innerHTML = ""; });
-  $$(".col .col-meta").forEach((m) => m.remove());
+
+  // Field-lever autocomplete: every discovered column when known, else just the boosted list.
+  const fieldSuggestions = data.columns ? data.columns.map((cl) => cl.name) : (data.fields || []).map((f) => f.split("^")[0]);
+  const fieldOptionsHtml = fieldSuggestions.map((f) => `<option value="${esc(f)}"></option>`).join("");
+
+  COL_KEYS.forEach((c) => {
+    BOOSTS[c] = (data.fields || []).map(parseBoost);
+    LEVERS[c] = { ...PRESETS[DEFAULT_PRESET[c]] };
+    LAST_RESULT[c] = null;
+    LAST_DSL[c] = null;
+    $(".col-preset", col(c)).value = DEFAULT_PRESET[c];
+    $(`#fieldOptions-${c}`).innerHTML = fieldOptionsHtml;
+    refreshColumnUI(c);
+    $(".results", col(c)).innerHTML = "";
+    $(".col-meta", col(c))?.remove();
+    $(".query-json", col(c)).hidden = true;
+    $(".query-json", col(c)).textContent = "";
+    const showQueryBtn = $(".show-query", col(c));
+    showQueryBtn.disabled = true;
+    showQueryBtn.textContent = "Show query";
+  });
   $("#compareSummary").hidden = true;
-  lastQuery = "";
   setBenchMode();
 }
 
@@ -165,119 +177,276 @@ function setupTabs() {
   }));
 }
 
-// ---------------------------------------------------------------- boosts collapse-to-side
-function setBoostsCollapsed(on) {
-  $(".layout").classList.toggle("boosts-collapsed", on);
-  $("#boostToggle").setAttribute("aria-expanded", String(!on));
-}
-function setupBoostCollapse() {
-  $("#boostToggle").addEventListener("click", () => setBoostsCollapsed(true));
-  $("#boostExpand").addEventListener("click", () => setBoostsCollapsed(false));
+// ---------------------------------------------------------------- playground columns
+// TYPES grouped for the <select> — multi-field recipes first, then the two single-field
+// families (match-family text queries, then term-level exact/pattern queries).
+const TYPE_GROUPS = (() => {
+  const order = [], byGroup = new Map();
+  TYPES.forEach((t) => {
+    if (!byGroup.has(t.group)) { byGroup.set(t.group, []); order.push(t.group); }
+    byGroup.get(t.group).push(t);
+  });
+  return order.map((name) => ({ name, items: byGroup.get(name) }));
+})();
+
+function leverRowHtml(c) {
+  const help = (k) => esc(LEVER_HELP[k] || "");
+  return `
+    <div class="lever-grid">
+      <label title="${help("type")}">Search type
+        <select class="lv-type">${TYPE_GROUPS.map((g) =>
+          `<optgroup label="${esc(g.name)}">${g.items.map((t) => `<option value="${t.key}">${esc(t.name)}</option>`).join("")}</optgroup>`).join("")}</select>
+      </label>
+      <label title="${help("field")}">Field <small>(single-field types)</small>
+        <input class="lv-field" type="text" list="fieldOptions-${c}" placeholder="e.g. resourceName">
+      </label>
+      <label title="${help("operator")}">Operator
+        <select class="lv-operator"><option value="">Default (OR)</option><option value="or">OR</option><option value="and">AND</option></select>
+      </label>
+      <label title="${help("fuzziness")}">Fuzziness
+        <select class="lv-fuzziness"><option value="">Off</option><option value="AUTO">AUTO</option><option value="1">1</option><option value="2">2</option></select>
+      </label>
+      <label title="${help("minimumShouldMatch")}">Min. should match
+        <input class="lv-msm" type="text" placeholder="e.g. 75%">
+      </label>
+      <label title="${help("slop")}">Slop
+        <input class="lv-slop" type="number" min="0" max="20" placeholder="0">
+      </label>
+      <label title="${help("tieBreaker")}">Tie breaker
+        <input class="lv-tie" type="number" min="0" max="1" step="0.1" placeholder="0.0">
+      </label>
+      <label class="lever-check" title="${help("caseInsensitive")}"><input type="checkbox" class="lv-ci"> Case insensitive</label>
+    </div>
+    <datalist id="fieldOptions-${c}"></datalist>`;
 }
 
-// ---------------------------------------------------------------- boost editor
-function setupBoostEditor() {
-  const ed = $("#boostEditor");
-  ed.addEventListener("input", (e) => {
-    const i = e.target.dataset.i;
-    if (i != null) BOOSTS[i].boost = Math.max(0, Number(e.target.value) || 0);
-  });
-  $("#resetBoosts").addEventListener("click", () => { BOOSTS = BOOSTS.map(({ field }) => ({ field, boost: 1 })); renderBoostEditor(); });
+function columnTemplate(c) {
+  const presetOpts = PRESET_ORDER.map((k) => `<option value="${k}">${esc(presetLabel(k).name)}</option>`).join("");
+  const openByDefault = LEVER_SUPPORT.boosts.has(PRESETS[DEFAULT_PRESET[c]].type);
+  return `
+    <form class="col-search">
+      <input type="search" class="col-q" placeholder="Search…" aria-label="Search query for column ${c}">
+      <button type="submit" class="go">Search</button>
+    </form>
+    <div class="col-head">
+      <div class="col-pickrow">
+        <select class="col-preset" aria-label="Preset for column ${c}">${presetOpts}</select>
+        <span class="info">
+          <span class="info-trigger" tabindex="0" role="button" aria-label="About this preset">i</span>
+          <span class="col-tip" role="tooltip"></span>
+        </span>
+      </div>
+      <div class="col-headline">
+        <span class="boost-ref"></span>
+        <button type="button" class="show-query link-btn" disabled>Show query</button>
+      </div>
+    </div>
+    <pre class="query-json" hidden></pre>
+    <details class="col-levers"${openByDefault ? " open" : ""}>
+      <summary>Levers &amp; field boosts</summary>
+      ${leverRowHtml(c)}
+      <p class="adv-note">
+        A boost multiplies how much a match in that field counts toward the score — a higher
+        number floats matches in that field to the top. Boosts only apply to the
+        <strong>multi-field</strong> search types (they weigh a whole field list); the
+        single-field types below them use the <strong>Field</strong> input instead and check
+        exactly that one column. Index-side settings (analyzers, synonyms) need an admin
+        rebuild and aren’t adjustable here.
+      </p>
+      <details class="type-note">
+        <summary>
+          <svg class="disclosure-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+          Which column types can be boosted?
+        </summary>
+        <p>
+          Only free-text columns are eligible match targets: <code>STRING</code>, <code>STRING_LIST</code>,
+          <code>LARGETEXT</code>, <code>MEDIUMTEXT</code>. Everything else — <code>ENTITYID</code>, <code>DATE</code>,
+          <code>INTEGER</code>, <code>DOUBLE</code>, <code>BOOLEAN</code>, <code>FILEHANDLEID</code>, <code>USERID</code>,
+          and their <code>*_LIST</code> variants — isn’t text to match against, so it's left out automatically. This
+          only applies to auto-discovered indexes; curated tables ship a hand-picked field list.
+        </p>
+      </details>
+      <div class="boost-editor"></div>
+      <div class="adv-row"><button type="button" class="link-btn reset-boosts">Reset boosts to 1</button></div>
+    </details>
+    <ul class="results"></ul>`;
 }
-function renderBoostEditor() {
-  $("#boostEditor").innerHTML = BOOSTS.map((b, i) =>
+
+// disable lever inputs OpenSearch would ignore for the currently selected type, so users
+// can't be misled into thinking an inert value is doing something.
+function applyLeverAvailability(colEl, type) {
+  const set = (selector, supported) => {
+    const el = $(selector, colEl);
+    el.disabled = !supported;
+    el.closest("label").classList.toggle("is-off", !supported);
+  };
+  set(".lv-field", LEVER_SUPPORT.field.has(type));
+  set(".lv-operator", LEVER_SUPPORT.operator.has(type));
+  set(".lv-fuzziness", LEVER_SUPPORT.fuzziness.has(type));
+  set(".lv-msm", LEVER_SUPPORT.minimumShouldMatch.has(type));
+  set(".lv-slop", LEVER_SUPPORT.slop.has(type));
+  set(".lv-tie", LEVER_SUPPORT.tieBreaker.has(type));
+  set(".lv-ci", LEVER_SUPPORT.caseInsensitive.has(type));
+}
+
+function renderBoostEditor(c) {
+  $(".boost-editor", col(c)).innerHTML = BOOSTS[c].map((b, i) =>
     `<label class="boost-field"><code>${esc(b.field)}</code>
        <input type="number" min="0" max="20" step="1" value="${b.boost}" data-i="${i}"></label>`).join("");
 }
 
-// ---------------------------------------------------------------- playground
+// Push LEVERS[c]/BOOSTS[c] state out to the DOM — used both at setup and whenever a new
+// index is loaded (resetting both columns to their defaults).
+function refreshColumnUI(c) {
+  const colEl = col(c);
+  const lv = LEVERS[c];
+  $(".lv-type", colEl).value = lv.type;
+  $(".lv-field", colEl).value = lv.field || "";
+  $(".lv-operator", colEl).value = lv.operator || "";
+  $(".lv-fuzziness", colEl).value = lv.fuzziness || "";
+  $(".lv-msm", colEl).value = lv.minimumShouldMatch || "";
+  $(".lv-slop", colEl).value = lv.slop ?? "";
+  $(".lv-tie", colEl).value = lv.tieBreaker ?? "";
+  $(".lv-ci", colEl).checked = !!lv.caseInsensitive;
+  applyLeverAvailability(colEl, lv.type);
+  renderBoostEditor(c);
+  const l = presetLabel($(".col-preset", colEl).value);
+  $(".col-tip", colEl).innerHTML = `${esc(l.blurb)} <span class="best-for">${esc(l.bestFor)}</span>`;
+  const boosted = LEVER_SUPPORT.boosts.has(lv.type);
+  const ref = $(".boost-ref", colEl);
+  ref.textContent = boosted ? "boosts applied" : "boosts ignored by this type";
+  ref.classList.toggle("is-boosted", boosted);
+}
+
 function setupColumns() {
-  const opts = STRATEGY_ORDER.map((k) =>
-    `<option value="${k}"${BOOSTED_KEYS.has(k) ? ' title="Uses Custom Field Boosts"' : ""}>${esc(strategyLabel(k).name)}</option>`
-  ).join("");
-  const defaults = { A: "frontend_default", B: "multi_match_cross" };
-  $$(".col").forEach((col) => {
-    const which = col.dataset.col;
-    col.innerHTML =
-      `<div class="col-head">
-         <div class="col-pickrow">
-           <select class="col-pick" aria-label="Recipe for column ${which}">${opts}</select>
-           <span class="info">
-             <span class="info-trigger" tabindex="0" role="button" aria-label="About this recipe">i</span>
-             <span class="col-tip" role="tooltip"></span>
-           </span>
-         </div>
-         <span class="boost-ref"></span>
-       </div>
-       <ul class="results"></ul>`;
-    const sel = $(".col-pick", col);
-    sel.value = defaults[which];
-    const refreshBlurb = () => {
-      const l = strategyLabel(sel.value);
-      $(".col-tip", col).innerHTML = `${esc(l.blurb)} <span class="best-for">${esc(l.bestFor)}</span>`;
-      const boosted = BOOSTED_KEYS.has(sel.value);
-      const ref = $(".boost-ref", col);
-      ref.textContent = boosted ? "→ with Custom Field Boosts" : "no boosts";
-      ref.classList.toggle("is-boosted", boosted);
-      refreshBoostLink();
+  COL_KEYS.forEach((c) => {
+    const colEl = col(c);
+    colEl.innerHTML = columnTemplate(c);
+    LEVERS[c] = { ...PRESETS[DEFAULT_PRESET[c]] };
+
+    const readLevers = () => ({
+      type: $(".lv-type", colEl).value,
+      field: $(".lv-field", colEl).value.trim() || undefined,
+      operator: $(".lv-operator", colEl).value || undefined,
+      fuzziness: $(".lv-fuzziness", colEl).value || undefined,
+      minimumShouldMatch: $(".lv-msm", colEl).value.trim() || undefined,
+      slop: $(".lv-slop", colEl).value,
+      tieBreaker: $(".lv-tie", colEl).value,
+      caseInsensitive: $(".lv-ci", colEl).checked,
+    });
+    const onLeverChange = () => {
+      // switching into a single-field type with no field chosen yet — default to the
+      // top-boosted field rather than leaving it empty (buildQuery would send field: "").
+      const type = $(".lv-type", colEl).value;
+      const fieldInput = $(".lv-field", colEl);
+      if (LEVER_SUPPORT.field.has(type) && !fieldInput.value.trim()) fieldInput.value = BOOSTS[c][0]?.field || "";
+      LEVERS[c] = readLevers();
+      applyLeverAvailability(colEl, LEVERS[c].type);
+      refreshColumnUI(c);
+      if (LAST_RESULT[c]) runColumn(c);
     };
-    refreshBlurb();
-    sel.addEventListener("change", () => { refreshBlurb(); if (lastQuery) runPlayground(); });
+    $(".lv-type", colEl).addEventListener("change", onLeverChange);
+    $(".lv-field", colEl).addEventListener("input", onLeverChange);
+    $(".lv-operator", colEl).addEventListener("change", onLeverChange);
+    $(".lv-fuzziness", colEl).addEventListener("change", onLeverChange);
+    $(".lv-msm", colEl).addEventListener("input", onLeverChange);
+    $(".lv-slop", colEl).addEventListener("input", onLeverChange);
+    $(".lv-tie", colEl).addEventListener("input", onLeverChange);
+    $(".lv-ci", colEl).addEventListener("change", onLeverChange);
+
+    $(".col-preset", colEl).addEventListener("change", (e) => {
+      LEVERS[c] = { ...PRESETS[e.target.value] };
+      refreshColumnUI(c);
+      if (LAST_RESULT[c]) runColumn(c);
+    });
+
+    $(".boost-editor", colEl).addEventListener("input", (e) => {
+      const i = e.target.dataset.i;
+      if (i != null) BOOSTS[c][i].boost = Math.max(0, Number(e.target.value) || 0);
+    });
+    $(".reset-boosts", colEl).addEventListener("click", () => {
+      BOOSTS[c] = BOOSTS[c].map(({ field }) => ({ field, boost: 1 }));
+      renderBoostEditor(c);
+    });
+
+    $(".col-search", colEl).addEventListener("submit", (e) => { e.preventDefault(); runColumn(c); });
+
+    $(".show-query", colEl).addEventListener("click", () => {
+      const pre = $(".query-json", colEl);
+      pre.hidden = !pre.hidden;
+      $(".show-query", colEl).textContent = pre.hidden ? "Show query" : "Hide query";
+    });
+
+    $(".results", colEl).addEventListener("click", (e) => {
+      const btn = e.target.closest(".hit-expand");
+      if (!btn) return;
+      const detail = $(".hit-detail", btn.closest(".hit"));
+      const opening = detail.hidden;
+      detail.hidden = !opening;
+      btn.setAttribute("aria-expanded", String(opening));
+      btn.textContent = opening ? "Hide all fields ▴" : "Show all fields ▾";
+    });
+
+    refreshColumnUI(c);
   });
 }
 
-// Highlights the "Custom Field Boosts" sidebar panel whenever a currently-selected recipe
-// (in either column) actually reads it, so the link between the two is obvious — and keeps
-// the panel's open/collapsed state in sync: pops it open once a boosted recipe is picked,
-// tucks it away again once neither column needs it.
-function refreshBoostLink() {
-  const linked = $$(".col-pick").some((sel) => BOOSTED_KEYS.has(sel.value));
-  $(".boost-card")?.classList.toggle("is-linked", linked);
-  $(".boost-rail")?.classList.toggle("is-linked", linked);
-  const collapsed = $(".layout").classList.contains("boosts-collapsed");
-  if (linked && collapsed) setBoostsCollapsed(false);
-  else if (!linked && !collapsed) setBoostsCollapsed(true);
-}
-
-let lastQuery = "";
-function setupSearch() {
-  $("#searchForm").addEventListener("submit", (e) => { e.preventDefault(); runPlayground(); });
-}
-
-async function runPlayground() {
-  const q = $("#q").value.trim();
-  lastQuery = q;
+// ---------------------------------------------------------------- playground search
+async function runColumn(c) {
+  const colEl = col(c);
+  const q = $(".col-q", colEl).value.trim();
   if (!q || !DATA) return;
   const size = Math.max(1, Number($("#sizeInput").value) || 10);
-  const fields = buildFields();
-  const cols = $$(".col");
-  cols.forEach((c) => { $(".results", c).innerHTML = `<li class="loading">searching…</li>`; });
-  $("#searchForm .go").disabled = true;
+  const fields = buildFields(c);
+  const dsl = buildQuery(q, size, fields, LEVERS[c]);
+  LAST_DSL[c] = dsl;
+  $(".query-json", colEl).textContent = JSON.stringify(dsl, null, 2);
+  $(".show-query", colEl).disabled = false;
+  $(".results", colEl).innerHTML = `<li class="loading">searching…</li>`;
+  $(".go", colEl).disabled = true;
 
-  const runs = await Promise.all(cols.map(async (col) => {
-    const key = $(".col-pick", col).value;
-    try {
-      const res = await search(DATA.index, STRATEGIES[key](q, size, fields), { responseParts: ["HITS", "TOTAL_HITS"] });
-      return { col, hits: res.hits || [], total: res.totalHits };
-    } catch (err) { return { col, error: err.message }; }
-  }));
+  try {
+    const res = await search(DATA.index, dsl, { responseParts: ["HITS", "TOTAL_HITS"] });
+    LAST_RESULT[c] = { hits: res.hits || [], total: res.totalHits };
+  } catch (err) {
+    LAST_RESULT[c] = { error: err.message };
+  }
+  $(".go", colEl).disabled = false;
+  renderAll();
+}
 
-  const rankMaps = runs.map((r) => {
-    const m = new Map();
-    (r.hits || []).forEach((h, i) => m.set(hitId(h, DATA.id_field), i + 1));
-    return m;
+function rankMap(result) {
+  const m = new Map();
+  if (result && result.hits) result.hits.forEach((h, i) => m.set(hitId(h, DATA.id_field), i + 1));
+  return m;
+}
+
+function renderAll() {
+  const other = { A: "B", B: "A" };
+  COL_KEYS.forEach((c) => {
+    const r = LAST_RESULT[c];
+    if (!r) return;
+    renderColumn({ col: col(c), ...r }, rankMap(LAST_RESULT[other[c]]));
   });
-  runs.forEach((r, i) => renderColumn(r, rankMaps[1 - i]));
-  renderCompareSummary(runs, rankMaps);
-  $("#searchForm .go").disabled = false;
+  renderCompareSummary();
+}
+
+function columnLabel(c) {
+  const lv = LEVERS[c];
+  const bits = [typeName(lv.type)];
+  if (lv.operator) bits.push(lv.operator.toUpperCase());
+  if (lv.fuzziness) bits.push(`fuzzy ${lv.fuzziness}`);
+  return bits.join(" · ");
 }
 
 // How much the two columns' result sets overlap (shown above the comparison).
-function renderCompareSummary(runs, [A, B]) {
+function renderCompareSummary() {
   const box = $("#compareSummary");
-  // only meaningful when both sides returned results
-  if (runs.some((r) => r.error) || !A.size || !B.size) { box.hidden = true; return; }
-  const labels = runs.map((r) => strategyLabel($(".col-pick", r.col).value).name);
+  const a = LAST_RESULT.A, b = LAST_RESULT.B;
+  if (!a || !b || a.error || b.error || !a.hits?.length || !b.hits?.length) { box.hidden = true; return; }
+  const A = rankMap(a), B = rankMap(b);
+  const labels = [columnLabel("A"), columnLabel("B")];
   const shared = [...A.keys()].filter((id) => B.has(id));
   const sameSpot = shared.filter((id) => A.get(id) === B.get(id)).length;
   const onlyA = A.size - shared.length;
@@ -292,12 +461,12 @@ function renderCompareSummary(runs, [A, B]) {
     stat(onlyB, `only in <em>${esc(labels[1])}</em>`);
 }
 
-function renderColumn({ col, hits, total, error }, otherRanks) {
-  const ul = $(".results", col);
+function renderColumn({ col: colEl, hits, total, error }, otherRanks) {
+  const ul = $(".results", colEl);
   if (error) { ul.innerHTML = `<li class="errbox">Query failed: ${esc(error)}</li>`; return; }
   if (!hits.length) { ul.innerHTML = `<li class="empty">No results.</li>`; return; }
-  let meta = $(".col-meta", col);
-  if (!meta) { meta = document.createElement("p"); meta.className = "col-meta"; $(".col-head", col).appendChild(meta); }
+  let meta = $(".col-meta", colEl);
+  if (!meta) { meta = document.createElement("p"); meta.className = "col-meta"; $(".col-head", colEl).appendChild(meta); }
   meta.textContent = `${hits.length} shown · ${total ?? "?"} total matches`;
 
   ul.innerHTML = hits.map((h, i) => {
@@ -317,14 +486,25 @@ function renderColumn({ col, hits, total, error }, otherRanks) {
       <div class="sub">${chips}<span class="score">score ${fmtScore(h.score)}</span></div>
       ${desc ? `<div class="desc">${esc(desc)}</div>` : ""}
       <div class="rid">${esc(id ?? "")}</div>
+      <button type="button" class="hit-expand" aria-expanded="false">Show all fields ▾</button>
+      ${hitDetailHtml(h, d)}
     </li>`;
   }).join("");
 }
 
+// Every field the hit actually carries (not just the curated name/type/desc subset above)
+// — shown on demand so a comparison can be checked against the row's full data.
+function hitDetailHtml(h, d) {
+  const rows = Object.entries(d)
+    .filter(([, v]) => v != null && v !== "")
+    .map(([k, v]) => `<div class="field-row"><span class="field-name">${esc(k)}</span><span class="field-value">${esc(Array.isArray(v) ? v.join(", ") : v)}</span></div>`)
+    .join("");
+  const scoreRow = `<div class="field-row"><span class="field-name">score</span><span class="field-value">${fmtScore(h.score)}</span></div>`;
+  const rowIdRow = h.rowId != null ? `<div class="field-row"><span class="field-name">rowId</span><span class="field-value">${esc(h.rowId)}</span></div>` : "";
+  return `<div class="hit-detail" hidden>${rowIdRow}${scoreRow}${rows}</div>`;
+}
+
 function deltaBadge(rank, oRank) {
-  // absent from the other side entirely isn't worth a per-row badge — with two very
-  // different recipes that's most rows, and it's just noise; the compare-summary bar
-  // above already states "N only in <recipe>" in aggregate.
   if (oRank == null) return "";
   const diff = oRank - rank;
   if (diff === 0) return `<span class="delta same" title="same position">=</span>`;
@@ -359,8 +539,8 @@ function setBenchMode() {
   }
   updateEstimate();
   if (DATA.precomputed) {
-    LAST_BENCH = { ...DATA.precomputed, k: DATA.precomputed.k || DATA.k, live: false };
-    renderBench(LAST_BENCH, `Showing the precomputed baseline (${esc(DATA.precomputed.label || "baseline")}). Run live to recompute with your boost settings.`);
+    const bench = { ...DATA.precomputed, k: DATA.precomputed.k || DATA.k, live: false };
+    renderBench(bench, `Showing the precomputed baseline (${esc(DATA.precomputed.label || "baseline")}). Run live to recompute with your boost settings.`);
   }
 }
 
@@ -375,7 +555,9 @@ async function runBenchmark() {
   if (!keys.length || !DATA.cases.length) return;
   const k = DATA.k || 10;
   const size = Math.max(k, 10);
-  const fields = buildFields();
+  // benchmark scoring uses column A's boost configuration (the benchmark tab isn't a
+  // side-by-side comparison — it scores one configuration against the golden set).
+  const fields = buildFields("A");
   const tasks = [];
   keys.forEach((sk) => DATA.cases.forEach((c) => tasks.push({ sk, c })));
 
@@ -411,10 +593,10 @@ async function runBenchmark() {
 
   const strategies = {}, per_case = {};
   keys.forEach((sk) => { strategies[sk] = aggregate(acc[sk].caseScores, acc[sk].rts); per_case[sk] = acc[sk].perCase; });
-  LAST_BENCH = { strategies, per_case, k, live: true };
+  const bench = { strategies, per_case, k, live: true };
   $("#benchProgress").hidden = true;
   $("#runBench").disabled = false;
-  renderBench(LAST_BENCH, `Live run · ${tasks.length} queries against ${esc(DATA.index_name)} · k=${k}.`);
+  renderBench(bench, `Live run · ${tasks.length} queries against ${esc(DATA.index_name)} · k=${k}.`);
 }
 
 // `reverse` flips the metric's natural "best first" direction — toggled by clicking the
