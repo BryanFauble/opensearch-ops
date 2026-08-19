@@ -245,9 +245,11 @@ function columnTemplate(c) {
       </label>
       <p class="adv-note">
         A boost multiplies how much a match in that field counts toward the score — a higher
-        number floats matches in that field to the top. Only the <strong>multi-field</strong>
-        search types can use them (they weigh a whole field list); the single-field types use
-        the <strong>Field</strong> input instead and check exactly that one column. Index-side
+        number floats matches in that field to the top. Off (the default): the multi-field
+        types search every field on the index, same as Default site search. On: the query is
+        restricted to just the fields below, weighted as shown. Only the
+        <strong>multi-field</strong> search types can use them; the single-field types use the
+        <strong>Field</strong> input instead and check exactly that one column. Index-side
         settings (analyzers, synonyms) need an admin rebuild and aren’t adjustable here.
       </p>
       <details class="type-note">

@@ -107,15 +107,24 @@ export function buildQuery(q, size, fields, levers = {}) {
     return { query: { [type]: { [field]: singleFieldBody(type, q, levers) } }, size };
   }
 
-  const f = (LEVER_SUPPORT.boosts.has(type) && levers.useBoosts) ? fields : unboosted(fields);
+  const f = levers.useBoosts ? fields : unboosted(fields);
+  // Only the playground's boosts toggle ever sets useBoosts to a real boolean (readLevers()
+  // always reads a checkbox, so it's true or false, never undefined). The benchmark's fixed
+  // STRATEGIES below never set it at all — so `undefined` keeps the old behavior (send an
+  // explicit, unweighted field list) while an explicit `false` (boosts turned off) omits
+  // `fields` entirely, same as frontend_default: search every field, no manual list needed.
+  const includeFields = levers.useBoosts !== false;
   if (type === "simple_query_string") {
-    const sqs = { query: q, fields: f };
+    const sqs = { query: q };
+    if (includeFields) sqs.fields = f;
     if (levers.operator) sqs.default_operator = levers.operator.toUpperCase();
     if (levers.minimumShouldMatch) sqs.minimum_should_match = levers.minimumShouldMatch;
     return { query: { simple_query_string: sqs }, size };
   }
 
-  const mm = { query: q, fields: f, type };
+  const mm = { query: q };
+  if (includeFields) mm.fields = f;
+  mm.type = type;
   if (levers.operator && LEVER_SUPPORT.operator.has(type)) mm.operator = levers.operator;
   if (levers.fuzziness && LEVER_SUPPORT.fuzziness.has(type)) mm.fuzziness = levers.fuzziness;
   if (levers.minimumShouldMatch && LEVER_SUPPORT.minimumShouldMatch.has(type)) mm.minimum_should_match = levers.minimumShouldMatch;
