@@ -128,8 +128,9 @@ export function buildQuery(q, size, fields, levers = {}) {
   // frontend_default_tunable is the editable copy of Default site search: same underlying
   // best_fields shape (OpenSearch's implicit default when `type` is omitted), but routed
   // through this generic path so operator/fuzziness/minimum_should_match/tie_breaker/boosts
-  // are all live instead of hardcoded.
-  mm.type = type === "frontend_default_tunable" ? "best_fields" : type;
+  // are all live instead of hardcoded. Omit `type` here too, so an untouched copy is
+  // byte-identical to frontend_default's DSL rather than just behaviorally equivalent.
+  if (type !== "frontend_default_tunable") mm.type = type;
   if (levers.operator && LEVER_SUPPORT.operator.has(type)) mm.operator = levers.operator;
   if (levers.fuzziness && LEVER_SUPPORT.fuzziness.has(type)) mm.fuzziness = levers.fuzziness;
   if (levers.minimumShouldMatch && LEVER_SUPPORT.minimumShouldMatch.has(type)) mm.minimum_should_match = levers.minimumShouldMatch;

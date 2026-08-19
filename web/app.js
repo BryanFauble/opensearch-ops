@@ -342,6 +342,16 @@ function setupColumns() {
       const type = $(".lv-type", colEl).value;
       const fieldInput = $(".lv-field", colEl);
       if (LEVER_SUPPORT.field.has(type) && !fieldInput.value.trim()) fieldInput.value = BOOSTS[c][0]?.field || "";
+      // Selecting the editable copy of Default site search should start out an actual
+      // copy — reset the levers it exposes to the frozen baseline's fixed values instead
+      // of leaving behind whatever the previously selected type had set.
+      if (type === "frontend_default_tunable" && LEVERS[c].type !== "frontend_default_tunable") {
+        $(".lv-operator", colEl).value = "";
+        $(".lv-fuzziness", colEl).value = "AUTO";
+        $(".lv-msm", colEl).value = "";
+        $(".lv-tie", colEl).value = "";
+        $(".lv-boosts", colEl).checked = false;
+      }
       LEVERS[c] = readLevers();
       applyLeverAvailability(colEl, LEVERS[c].type);
       refreshColumnUI(c);
