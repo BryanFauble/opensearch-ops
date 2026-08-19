@@ -6,10 +6,10 @@
 // Logic/data mirror the Python harness (synapse.js / strategies.js / score.js).
 
 import { search, hitDict, hitId, indexName, indexColumns, listSearchIndexes } from "./synapse.js";
-import { STRATEGIES, STRATEGY_ORDER, BOOSTED_KEYS, TYPES, PRESETS, PRESET_ORDER, LEVER_SUPPORT, buildQuery } from "./strategies.js";
+import { STRATEGIES, STRATEGY_ORDER, BOOSTED_KEYS, TYPES, LEVER_SUPPORT, buildQuery } from "./strategies.js";
 import { scoreCase, aggregate } from "./score.js";
 import { generateFieldBoosts } from "./boostgen.js";
-import { strategyLabel, presetLabel, LEVER_HELP, METRIC_LABELS, toolTypeIcon } from "./labels.js";
+import { strategyLabel, LEVER_HELP, METRIC_LABELS, toolTypeIcon } from "./labels.js";
 
 // Shared SearchIndex collection project (children = every portal's index). See README.
 const PROJECT = "syn74909065";
@@ -24,8 +24,12 @@ const TYPE_KEYS = ["resourceType", "type", "studyStatus", "category"];
 
 const COL_KEYS = ["A", "B"];
 // B defaults to cross_fields+AND — the fix discussed for multi-word queries getting
-// diluted by OR — compared against the unmodified front-end baseline in A.
-const DEFAULT_PRESET = { A: "frontend_default", B: "cross_fields_and" };
+// diluted by OR — compared against the unmodified front-end baseline in A. Field boosts
+// default off for both; flip "Use field boosts" on to layer them in.
+const DEFAULT_LEVERS = {
+  A: { type: "frontend_default" },
+  B: { type: "cross_fields", operator: "and", useBoosts: false },
+};
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -151,10 +155,9 @@ function applyData(data) {
 
   COL_KEYS.forEach((c) => {
     BOOSTS[c] = (data.fields || []).map(parseBoost);
-    LEVERS[c] = { ...PRESETS[DEFAULT_PRESET[c]] };
+    LEVERS[c] = { ...DEFAULT_LEVERS[c] };
     LAST_RESULT[c] = null;
     LAST_DSL[c] = null;
-    $(".col-preset", col(c)).value = DEFAULT_PRESET[c];
     $(`#fieldOptions-${c}`).innerHTML = fieldOptionsHtml;
     refreshColumnUI(c);
     $(".results", col(c)).innerHTML = "";
@@ -221,21 +224,13 @@ function leverRowHtml(c) {
 }
 
 function columnTemplate(c) {
-  const presetOpts = PRESET_ORDER.map((k) => `<option value="${k}">${esc(presetLabel(k).name)}</option>`).join("");
-  const openByDefault = LEVER_SUPPORT.boosts.has(PRESETS[DEFAULT_PRESET[c]].type);
+  const openByDefault = c === "B";
   return `
     <form class="col-search">
       <input type="search" class="col-q" placeholder="Search…" aria-label="Search query for column ${c}">
       <button type="submit" class="go">Search</button>
     </form>
     <div class="col-head">
-      <div class="col-pickrow">
-        <select class="col-preset" aria-label="Preset for column ${c}">${presetOpts}</select>
-        <span class="info">
-          <span class="info-trigger" tabindex="0" role="button" aria-label="About this preset">i</span>
-          <span class="col-tip" role="tooltip"></span>
-        </span>
-      </div>
       <div class="col-headline">
         <span class="boost-ref"></span>
         <button type="button" class="show-query link-btn" disabled>Show query</button>
@@ -245,13 +240,15 @@ function columnTemplate(c) {
     <details class="col-levers"${openByDefault ? " open" : ""}>
       <summary>Levers &amp; field boosts</summary>
       ${leverRowHtml(c)}
+      <label class="boost-toggle-row" title="${esc(LEVER_HELP.useBoosts)}">
+        <input type="checkbox" class="lv-boosts"> Use field boosts <small>(off by default)</small>
+      </label>
       <p class="adv-note">
         A boost multiplies how much a match in that field counts toward the score — a higher
-        number floats matches in that field to the top. Boosts only apply to the
-        <strong>multi-field</strong> search types (they weigh a whole field list); the
-        single-field types below them use the <strong>Field</strong> input instead and check
-        exactly that one column. Index-side settings (analyzers, synonyms) need an admin
-        rebuild and aren’t adjustable here.
+        number floats matches in that field to the top. Only the <strong>multi-field</strong>
+        search types can use them (they weigh a whole field list); the single-field types use
+        the <strong>Field</strong> input instead and check exactly that one column. Index-side
+        settings (analyzers, synonyms) need an admin rebuild and aren’t adjustable here.
       </p>
       <details class="type-note">
         <summary>
@@ -288,12 +285,14 @@ function applyLeverAvailability(colEl, type) {
   set(".lv-slop", LEVER_SUPPORT.slop.has(type));
   set(".lv-tie", LEVER_SUPPORT.tieBreaker.has(type));
   set(".lv-ci", LEVER_SUPPORT.caseInsensitive.has(type));
+  set(".lv-boosts", LEVER_SUPPORT.boosts.has(type));
 }
 
 function renderBoostEditor(c) {
+  const boostsActive = LEVER_SUPPORT.boosts.has(LEVERS[c].type) && LEVERS[c].useBoosts;
   $(".boost-editor", col(c)).innerHTML = BOOSTS[c].map((b, i) =>
     `<label class="boost-field"><code>${esc(b.field)}</code>
-       <input type="number" min="0" max="20" step="1" value="${b.boost}" data-i="${i}"></label>`).join("");
+       <input type="number" min="0" max="20" step="1" value="${b.boost}" data-i="${i}"${boostsActive ? "" : " disabled"}></label>`).join("");
 }
 
 // Push LEVERS[c]/BOOSTS[c] state out to the DOM — used both at setup and whenever a new
@@ -309,13 +308,12 @@ function refreshColumnUI(c) {
   $(".lv-slop", colEl).value = lv.slop ?? "";
   $(".lv-tie", colEl).value = lv.tieBreaker ?? "";
   $(".lv-ci", colEl).checked = !!lv.caseInsensitive;
+  $(".lv-boosts", colEl).checked = !!lv.useBoosts;
   applyLeverAvailability(colEl, lv.type);
   renderBoostEditor(c);
-  const l = presetLabel($(".col-preset", colEl).value);
-  $(".col-tip", colEl).innerHTML = `${esc(l.blurb)} <span class="best-for">${esc(l.bestFor)}</span>`;
-  const boosted = LEVER_SUPPORT.boosts.has(lv.type);
+  const boosted = LEVER_SUPPORT.boosts.has(lv.type) && lv.useBoosts;
   const ref = $(".boost-ref", colEl);
-  ref.textContent = boosted ? "boosts applied" : "boosts ignored by this type";
+  ref.textContent = boosted ? "boosts applied" : "boosts off";
   ref.classList.toggle("is-boosted", boosted);
 }
 
@@ -323,7 +321,7 @@ function setupColumns() {
   COL_KEYS.forEach((c) => {
     const colEl = col(c);
     colEl.innerHTML = columnTemplate(c);
-    LEVERS[c] = { ...PRESETS[DEFAULT_PRESET[c]] };
+    LEVERS[c] = { ...DEFAULT_LEVERS[c] };
 
     const readLevers = () => ({
       type: $(".lv-type", colEl).value,
@@ -334,6 +332,7 @@ function setupColumns() {
       slop: $(".lv-slop", colEl).value,
       tieBreaker: $(".lv-tie", colEl).value,
       caseInsensitive: $(".lv-ci", colEl).checked,
+      useBoosts: $(".lv-boosts", colEl).checked,
     });
     const onLeverChange = () => {
       // switching into a single-field type with no field chosen yet — default to the
@@ -354,12 +353,7 @@ function setupColumns() {
     $(".lv-slop", colEl).addEventListener("input", onLeverChange);
     $(".lv-tie", colEl).addEventListener("input", onLeverChange);
     $(".lv-ci", colEl).addEventListener("change", onLeverChange);
-
-    $(".col-preset", colEl).addEventListener("change", (e) => {
-      LEVERS[c] = { ...PRESETS[e.target.value] };
-      refreshColumnUI(c);
-      if (LAST_RESULT[c]) runColumn(c);
-    });
+    $(".lv-boosts", colEl).addEventListener("change", onLeverChange);
 
     $(".boost-editor", colEl).addEventListener("input", (e) => {
       const i = e.target.dataset.i;

@@ -70,21 +70,6 @@ export const LEVER_SUPPORT = {
   caseInsensitive: new Set(["term", "prefix", "wildcard"]),
 };
 
-// Named quick-select combos — a starting point, not a limit; every lever they set can be
-// changed afterward. Deliberately smaller than the old fixed recipe list: "best field"
-// and "boosted by name" used to be separate recipes only because one hard-coded no boosts
-// — now boosts are just whatever the field-boost editor holds, for every type.
-export const PRESETS = {
-  frontend_default: { type: "frontend_default" },
-  simple_query_string: { type: "simple_query_string" },
-  best_fields: { type: "best_fields" },
-  cross_fields_and: { type: "cross_fields", operator: "and" },
-  best_fields_fuzzy: { type: "best_fields", fuzziness: "AUTO" },
-  phrase_prefix: { type: "phrase_prefix" },
-  exact_phrase: { type: "phrase", slop: 0 },
-};
-export const PRESET_ORDER = Object.keys(PRESETS);
-
 // The body of a single-field clause, e.g. { match: { <field>: <this> } } — shape depends
 // on the family: term-level queries take a bare value (terms takes a bare array), the
 // match family takes the same text-analysis levers multi_match does.
@@ -122,7 +107,7 @@ export function buildQuery(q, size, fields, levers = {}) {
     return { query: { [type]: { [field]: singleFieldBody(type, q, levers) } }, size };
   }
 
-  const f = LEVER_SUPPORT.boosts.has(type) ? fields : unboosted(fields);
+  const f = (LEVER_SUPPORT.boosts.has(type) && levers.useBoosts) ? fields : unboosted(fields);
   if (type === "simple_query_string") {
     const sqs = { query: q, fields: f };
     if (levers.operator) sqs.default_operator = levers.operator.toUpperCase();
@@ -147,10 +132,10 @@ export const STRATEGIES = {
   frontend_default: (q, size) => buildQuery(q, size, [], { type: "frontend_default" }),
   simple_query_string: (q, size, fields) => buildQuery(q, size, unboosted(fields), { type: "simple_query_string" }),
   multi_match_best: (q, size, fields) => buildQuery(q, size, unboosted(fields), { type: "best_fields" }),
-  multi_match_boosted: (q, size, fields) => buildQuery(q, size, fields, { type: "best_fields" }),
-  multi_match_cross: (q, size, fields) => buildQuery(q, size, fields, { type: "cross_fields" }),
-  boosted_fuzzy: (q, size, fields) => buildQuery(q, size, fields, { type: "best_fields", fuzziness: "AUTO" }),
-  phrase_prefix: (q, size, fields) => buildQuery(q, size, fields, { type: "phrase_prefix" }),
+  multi_match_boosted: (q, size, fields) => buildQuery(q, size, fields, { type: "best_fields", useBoosts: true }),
+  multi_match_cross: (q, size, fields) => buildQuery(q, size, fields, { type: "cross_fields", useBoosts: true }),
+  boosted_fuzzy: (q, size, fields) => buildQuery(q, size, fields, { type: "best_fields", fuzziness: "AUTO", useBoosts: true }),
+  phrase_prefix: (q, size, fields) => buildQuery(q, size, fields, { type: "phrase_prefix", useBoosts: true }),
 };
 
 // Stable display order (matches strategies.py STRATEGIES insertion order).
