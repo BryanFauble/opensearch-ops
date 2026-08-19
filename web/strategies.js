@@ -29,6 +29,7 @@ function unboosted(fields) {
 // Synapse backend doesn't accept it yet (PLFM-9753); listing a type that 400s isn't useful.
 export const TYPES = [
   { key: "frontend_default", name: "Default site search", group: "Multi-field (boosted fields list)" },
+  { key: "frontend_default_tunable", name: "Default site search (editable)", group: "Multi-field (boosted fields list)" },
   { key: "simple_query_string", name: "Google-style (simple_query_string)", group: "Multi-field (boosted fields list)" },
   { key: "best_fields", name: "Multi-match — best field", group: "Multi-field (boosted fields list)" },
   { key: "most_fields", name: "Multi-match — most fields", group: "Multi-field (boosted fields list)" },
@@ -61,12 +62,12 @@ const SINGLE_FIELD_TYPES = new Set([...MATCH_FAMILY_TYPES, ...TERM_LEVEL_TYPES])
 // playground greys out per selected type, and which keys buildQuery emits.
 export const LEVER_SUPPORT = {
   field: SINGLE_FIELD_TYPES,
-  operator: new Set(["simple_query_string", "best_fields", "most_fields", "cross_fields", "bool_prefix", "match", "match_bool_prefix"]),
-  fuzziness: new Set(["best_fields", "most_fields", "cross_fields", "bool_prefix", "match", "match_bool_prefix", "fuzzy"]),
-  minimumShouldMatch: new Set(["simple_query_string", "best_fields", "most_fields", "cross_fields", "bool_prefix", "match", "match_bool_prefix"]),
+  operator: new Set(["simple_query_string", "best_fields", "frontend_default_tunable", "most_fields", "cross_fields", "bool_prefix", "match", "match_bool_prefix"]),
+  fuzziness: new Set(["best_fields", "frontend_default_tunable", "most_fields", "cross_fields", "bool_prefix", "match", "match_bool_prefix", "fuzzy"]),
+  minimumShouldMatch: new Set(["simple_query_string", "best_fields", "frontend_default_tunable", "most_fields", "cross_fields", "bool_prefix", "match", "match_bool_prefix"]),
   slop: new Set(["phrase", "phrase_prefix", "match_phrase", "match_phrase_prefix"]),
-  tieBreaker: new Set(["best_fields", "most_fields", "phrase", "phrase_prefix", "bool_prefix"]),
-  boosts: new Set(["simple_query_string", "best_fields", "most_fields", "cross_fields", "phrase", "phrase_prefix", "bool_prefix"]),
+  tieBreaker: new Set(["best_fields", "frontend_default_tunable", "most_fields", "phrase", "phrase_prefix", "bool_prefix"]),
+  boosts: new Set(["simple_query_string", "best_fields", "frontend_default_tunable", "most_fields", "cross_fields", "phrase", "phrase_prefix", "bool_prefix"]),
   caseInsensitive: new Set(["term", "prefix", "wildcard"]),
 };
 
@@ -124,7 +125,11 @@ export function buildQuery(q, size, fields, levers = {}) {
 
   const mm = { query: q };
   if (includeFields) mm.fields = f;
-  mm.type = type;
+  // frontend_default_tunable is the editable copy of Default site search: same underlying
+  // best_fields shape (OpenSearch's implicit default when `type` is omitted), but routed
+  // through this generic path so operator/fuzziness/minimum_should_match/tie_breaker/boosts
+  // are all live instead of hardcoded.
+  mm.type = type === "frontend_default_tunable" ? "best_fields" : type;
   if (levers.operator && LEVER_SUPPORT.operator.has(type)) mm.operator = levers.operator;
   if (levers.fuzziness && LEVER_SUPPORT.fuzziness.has(type)) mm.fuzziness = levers.fuzziness;
   if (levers.minimumShouldMatch && LEVER_SUPPORT.minimumShouldMatch.has(type)) mm.minimum_should_match = levers.minimumShouldMatch;

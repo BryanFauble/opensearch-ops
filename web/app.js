@@ -459,11 +459,11 @@ function renderCompareSummary() {
 
 function renderColumn({ col: colEl, hits, total, error }, otherRanks) {
   const ul = $(".results", colEl);
-  if (error) { ul.innerHTML = `<li class="errbox">Query failed: ${esc(error)}</li>`; return; }
-  if (!hits.length) { ul.innerHTML = `<li class="empty">No results.</li>`; return; }
   let meta = $(".col-meta", colEl);
   if (!meta) { meta = document.createElement("p"); meta.className = "col-meta"; $(".col-head", colEl).appendChild(meta); }
+  if (error) { ul.innerHTML = `<li class="errbox">Query failed: ${esc(error)}</li>`; meta.textContent = ""; return; }
   meta.textContent = `${hits.length} shown · ${total ?? "?"} total matches`;
+  if (!hits.length) { ul.innerHTML = `<li class="empty">No results.</li>`; return; }
 
   ul.innerHTML = hits.map((h, i) => {
     const d = hitDict(h);
