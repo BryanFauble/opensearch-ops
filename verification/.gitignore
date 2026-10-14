@@ -1,0 +1,6 @@
+node_modules/
+.site/
+test-results/
+playwright-report/
+# written by setup/setup_fixtures.py — synIDs of your own staging objects
+fixtures.json

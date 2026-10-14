@@ -1,0 +1,14 @@
+{
+  "name": "search-lab-verification",
+  "private": true,
+  "type": "module",
+  "description": "Playwright verification of the PLFM search tickets through the Search Lab UI. See README.md.",
+  "scripts": {
+    "serve": "python3 ../build_site.py --out .site && python3 -m http.server 3017 -d .site",
+    "e2e": "playwright test",
+    "e2e:report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0"
+  }
+}
