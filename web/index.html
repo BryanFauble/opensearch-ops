@@ -25,6 +25,14 @@
 
 <div class="instrument wrap">
   <label class="inst-field">
+    <span>Environment</span>
+    <select id="envPick" aria-label="Choose a Synapse environment">
+      <option value="prod">Prod</option>
+      <option value="staging">Staging</option>
+    </select>
+  </label>
+  <span class="env-badge" id="envBadge" hidden>Staging</span>
+  <label class="inst-field">
     <span>SearchIndex</span>
     <select id="indexPick" aria-label="Choose a SearchIndex"></select>
   </label>
@@ -34,6 +42,28 @@
   </span>
   <span class="inst-status" id="indexStatus">loading…</span>
 </div>
+
+<details class="conn wrap" id="conn">
+  <summary>Connection — <span id="connSummary"></span></summary>
+  <div class="conn-grid">
+    <label>SearchIndex project <small>(listed in the picker above)</small>
+      <input id="connProject" type="text" spellcheck="false" placeholder="syn74909065">
+    </label>
+    <label>Auth token <small>(JWT — a non-public index needs one)</small>
+      <input id="connToken" type="password" autocomplete="off" spellcheck="false"
+             placeholder="paste a personal access token">
+    </label>
+  </div>
+  <div class="conn-actions">
+    <button type="button" id="connApply" class="mini-go">Apply &amp; reload</button>
+    <button type="button" id="connReset" class="link-btn">Clear</button>
+  </div>
+  <p class="conn-note">
+    These apply to whichever environment is picked above. Settings are kept in this
+    browser’s local storage and nowhere else; the token is sent only as the
+    <code>Authorization</code> header on requests to that environment’s repo API.
+  </p>
+</details>
 
 <nav class="tabs wrap" role="tablist">
   <button class="tab is-active" role="tab" data-tab="playground" aria-selected="true">Search&nbsp;playground</button>
@@ -98,8 +128,9 @@
 
 <footer class="foot wrap">
   <p>
-    Queries hit the public Synapse <code>repo-prod</code> search API anonymously and reflect the
-    index’s <em>current</em> production config. Benchmark recipes &amp; scoring mirror
+    Queries hit the Synapse search API of the picked <strong>Environment</strong>
+    (<code>repo-prod</code>, anonymously, by default) and reflect that index’s <em>current</em>
+    config. Hybrid and semantic search are only offered on <code>repo-staging</code>. Benchmark recipes &amp; scoring mirror
     <code>benchmark/run.py</code>; the golden set is <code>benchmark/tools/golden.yaml</code>.
     <span id="genStamp"></span>
   </p>

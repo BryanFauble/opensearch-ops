@@ -1,14 +1,36 @@
-// Browser port of query.py — run an async SearchIndex query against the public
-// Synapse repo-prod API and return the SearchQueryResults.
+// Browser port of query.py — run an async SearchIndex query against a Synapse repo API
+// and return the SearchQueryResults.
 //
-// CORS is open on repo-prod (access-control-allow-origin: *) and these indexes are
-// public, so this works anonymously straight from a static page — no backend, no token.
+// Defaults to repo-prod, where CORS is open (access-control-allow-origin: *) and the
+// portal indexes are public, so it works anonymously straight from a static page.
+// `configure()` repoints it at repo-staging, which runs the next release against the same
+// data — the place in-development search features (hybrid / semantic) are live first.
 //
 // Keep this in sync with query.py (search / hit_dict). The async job pattern is identical:
 //   POST search/query/async/start  -> { token }
 //   GET  search/query/async/get/{token}  -> 202 / jobState:PROCESSING while running, else results
 
-const BASE = "https://repo-prod.prod.sagebase.org/repo/v1";
+export const ENDPOINTS = {
+  prod: "https://repo-prod.prod.sagebase.org/repo/v1",
+  staging: "https://repo-staging.prod.sagebase.org/repo/v1",
+};
+
+let BASE = ENDPOINTS.prod;
+let AUTH_TOKEN = null;
+
+// Point every call in this module at a Synapse environment (a key of ENDPOINTS) and/or
+// attach a bearer token (a personal access token). An empty/unknown value resets that half
+// to the default.
+export function configure({ env, token } = {}) {
+  BASE = ENDPOINTS[env] || ENDPOINTS.prod;
+  AUTH_TOKEN = token || null;
+}
+
+// The per-call token wins over the configured one, so a caller can still override it.
+const authHeaders = (token) => {
+  const t = token || AUTH_TOKEN;
+  return t ? { Authorization: `Bearer ${t}` } : {};
+};
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -21,8 +43,7 @@ export async function search(searchIndexId, searchQuery, {
   token = null,
   signal = null,
 } = {}) {
-  const headers = { "Content-Type": "application/json" };
-  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const headers = { "Content-Type": "application/json", ...authHeaders(token) };
 
   const payload = {
     concreteType: "org.sagebionetworks.repo.model.search.table.SearchIndexQuery",
@@ -35,7 +56,10 @@ export async function search(searchIndexId, searchQuery, {
     method: "POST", headers, body: JSON.stringify(payload), signal,
   });
   if (startRes.status !== 200 && startRes.status !== 201) {
-    throw new Error(`start failed (${startRes.status})`);
+    // The body carries why it was refused — the DSL validator's message, or for a semantic
+    // query things like an index built without vectors. Without it a 400 is unreadable.
+    const body = await startRes.json().catch(() => ({}));
+    throw new Error(`start failed (${startRes.status})${body.reason ? `: ${body.reason}` : ""}`);
   }
   const { token: jobToken } = await startRes.json();
 
@@ -55,7 +79,7 @@ export async function search(searchIndexId, searchQuery, {
 
 // The SearchIndex entity's display name (e.g. "nf-studies"); falls back to the synId.
 export async function indexName(searchIndexId, { token = null } = {}) {
-  const headers = token ? { Authorization: `Bearer ${token}` } : {};
+  const headers = authHeaders(token);
   try {
     const res = await fetch(`${BASE}/entity/${searchIndexId}`, { headers });
     if (res.ok) return (await res.json()).name || searchIndexId;
@@ -64,10 +88,10 @@ export async function indexName(searchIndexId, { token = null } = {}) {
 }
 
 // List every SearchIndex entity under a project, paging through entity/children.
-// Returns [{ id, name }] sorted by name. Works anonymously (these objects are public).
+// Returns [{ id, name }] sorted by name. Anonymous on repo-prod (those objects are public);
+// a project on another stack may need the configured token.
 export async function listSearchIndexes(parentId, { token = null } = {}) {
-  const headers = { "Content-Type": "application/json" };
-  if (token) headers.Authorization = `Bearer ${token}`;
+  const headers = { "Content-Type": "application/json", ...authHeaders(token) };
   const out = [];
   let nextPageToken = null;
   for (let guard = 0; guard < 20; guard++) {  // page cap — safety against a runaway token

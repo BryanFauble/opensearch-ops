@@ -5,14 +5,18 @@
 // schema discovered live, and its boosts auto-generated.
 // Logic/data mirror the Python harness (synapse.js / strategies.js / score.js).
 
-import { search, hitDict, hitId, indexName, indexColumns, listSearchIndexes } from "./synapse.js";
-import { STRATEGIES, STRATEGY_ORDER, BOOSTED_KEYS, TYPES, LEVER_SUPPORT, buildQuery } from "./strategies.js";
+import { search, hitDict, hitId, indexName, indexColumns, listSearchIndexes, configure } from "./synapse.js";
+import {
+  STRATEGIES, STRATEGY_ORDER, BOOSTED_KEYS, TYPES, PROD_TYPES, KEYWORD_TYPES, DEFAULT_KEYWORD_LEG, NORMALIZATIONS, COMBINATIONS,
+  combinationsFor, LEVER_SUPPORT, keywordLeverType, buildQuery,
+} from "./strategies.js";
 import { scoreCase, aggregate } from "./score.js";
 import { generateFieldBoosts } from "./boostgen.js";
 import { strategyLabel, LEVER_HELP, METRIC_LABELS, toolTypeIcon } from "./labels.js";
 
 // Shared SearchIndex collection project (children = every portal's index). See README.
-const PROJECT = "syn74909065";
+// repo-staging reads the same data, so this is the default on both environments.
+const DEFAULT_PROJECT = "syn74909065";
 const TOOLS_INDEX = "syn75081636";  // nf-tools — the only index with per-type icons
 const DISCOVERED = new Map();  // synID -> name, for indexes listed from the project
 
@@ -41,8 +45,41 @@ const typeName = (key) => (TYPES.find((t) => t.key === key) || {}).name || key;
 let DATA = null;                 // { index, index_name, k, id_field, fields, cases, precomputed, generated? }
 const BOOSTS = { A: [], B: [] };       // [{ field, boost }] editable per column, seeded from DATA.fields
 const LEVERS = { A: {}, B: {} };       // { type, operator, fuzziness, minimumShouldMatch, slop, tieBreaker } per column
-const LAST_RESULT = { A: null, B: null }; // { hits, total } | { error } | null (hasn't searched yet)
+const LAST_RESULT = { A: null, B: null }; // { hits, total, next, pages } | { error } | null (hasn't searched yet)
 const LAST_DSL = { A: null, B: null };    // the exact searchQuery DSL object sent for the last search, per column
+const SEQ = { A: 0, B: 0 };               // per-column request counter — a response for an older request is dropped
+
+// ---------------------------------------------------------------- connection
+// Which Synapse environment the whole page talks to (prod or staging), plus an optional
+// project override and token, kept in localStorage so they survive a reload. A change
+// reloads rather than re-wiring in place: every index listing, discovered schema and
+// result on the page belongs to the previous environment.
+const CONN_KEY = "searchlab.connection";
+
+const loadConn = () => {
+  try { return JSON.parse(localStorage.getItem(CONN_KEY)) || {}; } catch { return {}; }
+};
+const CONN = loadConn();  // { env, project, token }
+// Hybrid / semantic search is only live on staging, so only staging offers it.
+const STAGING = CONN.env === "staging";
+const project = () => CONN.project || DEFAULT_PROJECT;
+const saveConn = (conn) => { localStorage.setItem(CONN_KEY, JSON.stringify(conn)); location.reload(); };
+
+function setupConnection() {
+  $("#envPick").value = STAGING ? "staging" : "prod";
+  $("#envBadge").hidden = !STAGING;
+  $("#envPick").addEventListener("change", () => saveConn({ ...CONN, env: $("#envPick").value }));
+  $("#connProject").value = CONN.project || "";
+  $("#connToken").value = CONN.token || "";
+  $("#connSummary").textContent =
+    `${STAGING ? "repo-staging" : "repo-prod"} · ${CONN.token ? "token set" : "anonymous"}`;
+  $("#connApply").addEventListener("click", () => saveConn({
+    env: CONN.env,
+    project: $("#connProject").value.trim(),
+    token: $("#connToken").value.trim(),
+  }));
+  $("#connReset").addEventListener("click", () => saveConn({ env: CONN.env }));
+}
 
 // ---------------------------------------------------------------- bootstrap
 init().catch((e) => {
@@ -50,6 +87,8 @@ init().catch((e) => {
 });
 
 async function init() {
+  configure({ env: CONN.env, token: CONN.token });
+  setupConnection();
   const manifest = await fetch("data/manifest.json").then((r) => (r.ok ? r.json() : { tables: [] })).catch(() => ({ tables: [] }));
   setupTabs();
   setupColumns();
@@ -87,7 +126,7 @@ function setupIndexSelector(manifest) {
   $("#loadCustom").addEventListener("click", go);
   $("#customId").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(); } });
 
-  listSearchIndexes(PROJECT).then((rows) => {
+  listSearchIndexes(project()).then((rows) => {
     const others = rows.filter((r) => !curatedIds.has(r.id));
     if (!others.length) return;
     others.forEach((r) => DISCOVERED.set(r.id, r.name));
@@ -164,9 +203,7 @@ function applyData(data) {
     $(".col-meta", col(c))?.remove();
     $(".query-json", col(c)).hidden = true;
     $(".query-json", col(c)).textContent = "";
-    const showQueryBtn = $(".show-query", col(c));
-    showQueryBtn.disabled = true;
-    showQueryBtn.textContent = "Show query";
+    $(".show-query", col(c)).textContent = "Show query";
   });
   $("#compareSummary").hidden = true;
   setBenchMode();
@@ -181,24 +218,26 @@ function setupTabs() {
 }
 
 // ---------------------------------------------------------------- playground columns
-// TYPES grouped for the <select> — multi-field recipes first, then the two single-field
-// families (match-family text queries, then term-level exact/pattern queries).
-const TYPE_GROUPS = (() => {
-  const order = [], byGroup = new Map();
-  TYPES.forEach((t) => {
-    if (!byGroup.has(t.group)) { byGroup.set(t.group, []); order.push(t.group); }
-    byGroup.get(t.group).push(t);
-  });
-  return order.map((name) => ({ name, items: byGroup.get(name) }));
-})();
+// Types as <optgroup>s for a <select>, in TYPES order — multi-field recipes first, then
+// semantic (staging only), then the two single-field families (match-family text queries,
+// then term-level exact/pattern queries).
+function typeOptionsHtml(types) {
+  const byGroup = new Map();
+  types.forEach((t) => byGroup.set(t.group, [...(byGroup.get(t.group) || []), t]));
+  return [...byGroup].map(([name, items]) =>
+    `<optgroup label="${esc(name)}">${items.map((t) => `<option value="${t.key}">${esc(t.name)}</option>`).join("")}</optgroup>`).join("");
+}
+const optionsHtml = (values) => values.map((v) => `<option value="${v}">${v}</option>`).join("");
 
 function leverRowHtml(c) {
   const help = (k) => esc(LEVER_HELP[k] || "");
   return `
     <div class="lever-grid">
       <label title="${help("type")}">Search type
-        <select class="lv-type">${TYPE_GROUPS.map((g) =>
-          `<optgroup label="${esc(g.name)}">${g.items.map((t) => `<option value="${t.key}">${esc(t.name)}</option>`).join("")}</optgroup>`).join("")}</select>
+        <select class="lv-type">${typeOptionsHtml(STAGING ? TYPES : PROD_TYPES)}</select>
+      </label>
+      <label title="${help("keywordType")}">Keyword leg type
+        <select class="lv-kwtype">${typeOptionsHtml(KEYWORD_TYPES)}</select>
       </label>
       <label title="${help("field")}">Field <small>(single-field types)</small>
         <input class="lv-field" type="text" list="fieldOptions-${c}" placeholder="e.g. resourceName">
@@ -219,6 +258,31 @@ function leverRowHtml(c) {
         <input class="lv-tie" type="number" min="0" max="1" step="0.1" placeholder="0.0">
       </label>
       <label class="lever-check" title="${help("caseInsensitive")}"><input type="checkbox" class="lv-ci"> Case insensitive</label>
+      <label title="${help("semanticCutoff")}">Semantic cutoff
+        <select class="lv-semcut"><option value="k">Top-k nearest</option><option value="min_score">Min. similarity</option></select>
+      </label>
+      <label title="${help("semanticCutoffValue")}">Cutoff value
+        <input class="lv-semval" type="number" min="0" step="0.05" placeholder="k = results per side">
+      </label>
+      <label title="${help("pipelineSource")}">Search pipeline
+        <select class="lv-pipesrc">
+          <option value="inline">Inline (levers below)</option>
+          <option value="ref">Saved pipeline ($ref)</option>
+          <option value="default">Index default (none sent)</option>
+        </select>
+      </label>
+      <label title="${help("pipelineRef")}">Pipeline $ref
+        <input class="lv-piperef" type="text" spellcheck="false" placeholder="organizationName-name">
+      </label>
+      <label title="${help("normalization")}">Normalization
+        <select class="lv-norm">${optionsHtml(NORMALIZATIONS)}</select>
+      </label>
+      <label title="${help("combination")}">Combination
+        <select class="lv-comb">${optionsHtml(COMBINATIONS)}</select>
+      </label>
+      <label title="${help("semanticWeight")}">Semantic weight
+        <input class="lv-semw" type="number" min="0" max="1" step="0.05" placeholder="0.5">
+      </label>
     </div>
     <datalist id="fieldOptions-${c}"></datalist>`;
 }
@@ -233,7 +297,7 @@ function columnTemplate(c) {
     <div class="col-head">
       <div class="col-headline">
         <span class="boost-ref"></span>
-        <button type="button" class="show-query link-btn" disabled>Show query</button>
+        <button type="button" class="show-query link-btn">Show query</button>
       </div>
     </div>
     <pre class="query-json" hidden></pre>
@@ -273,13 +337,17 @@ function columnTemplate(c) {
 }
 
 // disable lever inputs OpenSearch would ignore for the currently selected type, so users
-// can't be misled into thinking an inert value is doing something.
-function applyLeverAvailability(colEl, type) {
+// can't be misled into thinking an inert value is doing something. The keyword levers
+// follow the keyword leg's type when the selected type is a hybrid. The semantic and hybrid
+// levers are hidden, not disabled, outside their own types.
+function applyLeverAvailability(colEl, levers) {
+  const type = keywordLeverType(levers);
   const set = (selector, supported) => {
     const el = $(selector, colEl);
     el.disabled = !supported;
     el.closest("label").classList.toggle("is-off", !supported);
   };
+  const show = (selector, supported) => { $(selector, colEl).closest("label").hidden = !supported; };
   set(".lv-field", LEVER_SUPPORT.field.has(type));
   set(".lv-operator", LEVER_SUPPORT.operator.has(type));
   set(".lv-fuzziness", LEVER_SUPPORT.fuzziness.has(type));
@@ -288,10 +356,22 @@ function applyLeverAvailability(colEl, type) {
   set(".lv-tie", LEVER_SUPPORT.tieBreaker.has(type));
   set(".lv-ci", LEVER_SUPPORT.caseInsensitive.has(type));
   set(".lv-boosts", LEVER_SUPPORT.boosts.has(type));
+  show(".lv-semcut", LEVER_SUPPORT.semanticCutoff.has(levers.type));
+  show(".lv-semval", LEVER_SUPPORT.semanticCutoff.has(levers.type));
+  show(".lv-kwtype", LEVER_SUPPORT.keywordType.has(levers.type));
+  // The pipeline levers only build an inline pipeline, so they're hidden for a $ref or none.
+  const inline = (levers.pipelineSource || "inline") === "inline";
+  show(".lv-pipesrc", LEVER_SUPPORT.pipelineSource.has(levers.type));
+  show(".lv-piperef", LEVER_SUPPORT.pipelineSource.has(levers.type) && levers.pipelineSource === "ref");
+  show(".lv-norm", LEVER_SUPPORT.pipeline.has(levers.type) && inline);
+  show(".lv-comb", LEVER_SUPPORT.pipeline.has(levers.type) && inline);
+  show(".lv-semw", LEVER_SUPPORT.semanticWeight.has(levers.type) && inline);
+  const allowed = combinationsFor(levers.normalization || NORMALIZATIONS[0]);
+  $$(".lv-comb option", colEl).forEach((o) => { o.disabled = !allowed.includes(o.value); });
 }
 
 function renderBoostEditor(c) {
-  const boostsActive = LEVER_SUPPORT.boosts.has(LEVERS[c].type) && LEVERS[c].useBoosts;
+  const boostsActive = LEVER_SUPPORT.boosts.has(keywordLeverType(LEVERS[c])) && LEVERS[c].useBoosts;
   $(".boost-editor", col(c)).innerHTML = BOOSTS[c].map((b, i) =>
     `<label class="boost-field"><code>${esc(b.field)}</code>
        <input type="number" min="0" max="20" step="1" value="${b.boost}" data-i="${i}"${boostsActive ? "" : " disabled"}></label>`).join("");
@@ -311,9 +391,17 @@ function refreshColumnUI(c) {
   $(".lv-tie", colEl).value = lv.tieBreaker ?? "";
   $(".lv-ci", colEl).checked = !!lv.caseInsensitive;
   $(".lv-boosts", colEl).checked = !!lv.useBoosts;
-  applyLeverAvailability(colEl, lv.type);
+  $(".lv-semcut", colEl).value = lv.semanticCutoff || "k";
+  $(".lv-semval", colEl).value = lv.semanticCutoffValue ?? "";
+  $(".lv-kwtype", colEl).value = lv.keywordType || DEFAULT_KEYWORD_LEG;
+  $(".lv-norm", colEl).value = lv.normalization || NORMALIZATIONS[0];
+  $(".lv-comb", colEl).value = lv.combination || COMBINATIONS[0];
+  $(".lv-semw", colEl).value = lv.semanticWeight ?? "";
+  $(".lv-pipesrc", colEl).value = lv.pipelineSource || "inline";
+  $(".lv-piperef", colEl).value = lv.pipelineRef || "";
+  applyLeverAvailability(colEl, lv);
   renderBoostEditor(c);
-  const boosted = LEVER_SUPPORT.boosts.has(lv.type) && lv.useBoosts;
+  const boosted = LEVER_SUPPORT.boosts.has(keywordLeverType(lv)) && lv.useBoosts;
   const ref = $(".boost-ref", colEl);
   ref.textContent = boosted ? "boosts applied" : "boosts off";
   ref.classList.toggle("is-boosted", boosted);
@@ -335,27 +423,43 @@ function setupColumns() {
       tieBreaker: $(".lv-tie", colEl).value,
       caseInsensitive: $(".lv-ci", colEl).checked,
       useBoosts: $(".lv-boosts", colEl).checked,
+      semanticCutoff: $(".lv-semcut", colEl).value,
+      semanticCutoffValue: $(".lv-semval", colEl).value,
+      keywordType: $(".lv-kwtype", colEl).value,
+      normalization: $(".lv-norm", colEl).value,
+      combination: $(".lv-comb", colEl).value,
+      semanticWeight: $(".lv-semw", colEl).value,
+      pipelineSource: $(".lv-pipesrc", colEl).value,
+      pipelineRef: $(".lv-piperef", colEl).value,
     });
     const onLeverChange = () => {
       // switching into a single-field type with no field chosen yet — default to the
       // top-boosted field rather than leaving it empty (buildQuery would send field: "").
-      const type = $(".lv-type", colEl).value;
+      const type = keywordLeverType({ type: $(".lv-type", colEl).value, keywordType: $(".lv-kwtype", colEl).value });
       const fieldInput = $(".lv-field", colEl);
       if (LEVER_SUPPORT.field.has(type) && !fieldInput.value.trim()) fieldInput.value = BOOSTS[c][0]?.field || "";
       // Selecting the editable copy of Default site search should start out an actual
       // copy — reset the levers it exposes to the frozen baseline's fixed values instead
       // of leaving behind whatever the previously selected type had set.
-      if (type === "frontend_default_tunable" && LEVERS[c].type !== "frontend_default_tunable") {
+      // A row count and a 0–1 similarity floor aren't interchangeable — carrying "10" over
+      // from top-k into min. similarity would ask for hits above similarity 10, i.e. none.
+      // Clear it on a mode switch so each mode's own default applies.
+      const cutoffMode = $(".lv-semcut", colEl).value;
+      if (cutoffMode !== (LEVERS[c].semanticCutoff || "k")) $(".lv-semval", colEl).value = "";
+      if (type === "frontend_default_tunable" && keywordLeverType(LEVERS[c]) !== "frontend_default_tunable") {
         $(".lv-operator", colEl).value = "";
         $(".lv-fuzziness", colEl).value = "AUTO";
         $(".lv-msm", colEl).value = "";
         $(".lv-tie", colEl).value = "";
         $(".lv-boosts", colEl).checked = false;
       }
+      const allowed = combinationsFor($(".lv-norm", colEl).value);
+      if (!allowed.includes($(".lv-comb", colEl).value)) $(".lv-comb", colEl).value = allowed[0];
       LEVERS[c] = readLevers();
-      applyLeverAvailability(colEl, LEVERS[c].type);
+      applyLeverAvailability(colEl, LEVERS[c]);
       refreshColumnUI(c);
       if (LAST_RESULT[c]) runColumn(c);
+      else if (!$(".query-json", colEl).hidden) updateQueryPreview(c);
     };
     $(".lv-type", colEl).addEventListener("change", onLeverChange);
     $(".lv-field", colEl).addEventListener("input", onLeverChange);
@@ -366,25 +470,42 @@ function setupColumns() {
     $(".lv-tie", colEl).addEventListener("input", onLeverChange);
     $(".lv-ci", colEl).addEventListener("change", onLeverChange);
     $(".lv-boosts", colEl).addEventListener("change", onLeverChange);
+    $(".lv-semcut", colEl).addEventListener("change", onLeverChange);
+    $(".lv-semval", colEl).addEventListener("input", onLeverChange);
+    $(".lv-kwtype", colEl).addEventListener("change", onLeverChange);
+    $(".lv-norm", colEl).addEventListener("change", onLeverChange);
+    $(".lv-comb", colEl).addEventListener("change", onLeverChange);
+    $(".lv-semw", colEl).addEventListener("input", onLeverChange);
+    $(".lv-pipesrc", colEl).addEventListener("change", onLeverChange);
+    $(".lv-piperef", colEl).addEventListener("input", onLeverChange);
 
     $(".boost-editor", colEl).addEventListener("input", (e) => {
       const i = e.target.dataset.i;
       if (i != null) BOOSTS[c][i].boost = Math.max(0, Number(e.target.value) || 0);
+      if (!$(".query-json", colEl).hidden) updateQueryPreview(c);
     });
     $(".reset-boosts", colEl).addEventListener("click", () => {
       BOOSTS[c] = BOOSTS[c].map(({ field }) => ({ field, boost: 1 }));
       renderBoostEditor(c);
+      if (!$(".query-json", colEl).hidden) updateQueryPreview(c);
     });
 
     $(".col-search", colEl).addEventListener("submit", (e) => { e.preventDefault(); runColumn(c); });
 
+    $(".col-q", colEl).addEventListener("input", () => {
+      if (!$(".query-json", colEl).hidden) updateQueryPreview(c);
+    });
+
     $(".show-query", colEl).addEventListener("click", () => {
       const pre = $(".query-json", colEl);
-      pre.hidden = !pre.hidden;
+      const showing = pre.hidden;
+      if (showing) updateQueryPreview(c);
+      pre.hidden = !showing;
       $(".show-query", colEl).textContent = pre.hidden ? "Show query" : "Hide query";
     });
 
     $(".results", colEl).addEventListener("click", (e) => {
+      if (e.target.closest(".next-page")) { nextPage(c); return; }
       const btn = e.target.closest(".hit-expand");
       if (!btn) return;
       const detail = $(".hit-detail", btn.closest(".hit"));
@@ -396,9 +517,24 @@ function setupColumns() {
 
     refreshColumnUI(c);
   });
+
+  $("#sizeInput").addEventListener("input", () => {
+    COL_KEYS.forEach((c) => { if (!$(".query-json", col(c)).hidden) updateQueryPreview(c); });
+  });
 }
 
 // ---------------------------------------------------------------- playground search
+// Builds the DSL from the column's current query text/size/levers/boosts and refreshes
+// the (possibly already-visible) query-json preview — live as the box is typed into, not
+// just a snapshot of the last executed search.
+function updateQueryPreview(c) {
+  const colEl = col(c);
+  const q = $(".col-q", colEl).value.trim();
+  const size = Math.max(1, Number($("#sizeInput").value) || 10);
+  LAST_DSL[c] = buildQuery(q, size, buildFields(c), LEVERS[c]);
+  $(".query-json", colEl).textContent = JSON.stringify(LAST_DSL[c], null, 2);
+}
+
 async function runColumn(c) {
   const colEl = col(c);
   const q = $(".col-q", colEl).value.trim();
@@ -408,17 +544,41 @@ async function runColumn(c) {
   const dsl = buildQuery(q, size, fields, LEVERS[c]);
   LAST_DSL[c] = dsl;
   $(".query-json", colEl).textContent = JSON.stringify(dsl, null, 2);
-  $(".show-query", colEl).disabled = false;
   $(".results", colEl).innerHTML = `<li class="loading">searching…</li>`;
   $(".go", colEl).disabled = true;
 
+  const seq = ++SEQ[c];
+  let result;
   try {
     const res = await search(DATA.index, dsl, { responseParts: ["HITS", "TOTAL_HITS"] });
-    LAST_RESULT[c] = { hits: res.hits || [], total: res.totalHits };
+    result = { hits: res.hits || [], total: res.totalHits, next: res.nextSearchAfter, pages: 1 };
   } catch (err) {
-    LAST_RESULT[c] = { error: err.message };
+    result = { error: err.message };
   }
+  if (seq !== SEQ[c]) return;
+  LAST_RESULT[c] = result;
   $(".go", colEl).disabled = false;
+  renderAll();
+}
+
+// Fetch the page after the last one shown — the same DSL plus the previous response's
+// nextSearchAfter cursor — and append its hits, so paging can be checked for rows that
+// repeat or go missing across pages.
+async function nextPage(c) {
+  const prev = LAST_RESULT[c];
+  const dsl = { ...LAST_DSL[c], search_after: prev.next };
+  $(".query-json", col(c)).textContent = JSON.stringify(dsl, null, 2);
+  $(".next-page", col(c)).disabled = true;
+  const seq = ++SEQ[c];
+  let result;
+  try {
+    const res = await search(DATA.index, dsl, { responseParts: ["HITS", "TOTAL_HITS"] });
+    result = { ...prev, hits: [...prev.hits, ...(res.hits || [])], next: res.hits?.length ? res.nextSearchAfter : null, pages: prev.pages + (res.hits?.length ? 1 : 0) };
+  } catch (err) {
+    result = { error: `page ${prev.pages + 1}: ${err.message}` };
+  }
+  if (seq !== SEQ[c]) return;
+  LAST_RESULT[c] = result;
   renderAll();
 }
 
@@ -441,6 +601,7 @@ function renderAll() {
 function columnLabel(c) {
   const lv = LEVERS[c];
   const bits = [typeName(lv.type)];
+  if (LEVER_SUPPORT.keywordType.has(lv.type)) bits.push(typeName(keywordLeverType(lv)), `${lv.normalization} + ${lv.combination}`);
   if (lv.operator) bits.push(lv.operator.toUpperCase());
   if (lv.fuzziness) bits.push(`fuzzy ${lv.fuzziness}`);
   return bits.join(" · ");
@@ -467,12 +628,14 @@ function renderCompareSummary() {
     stat(onlyB, `only in <em>${esc(labels[1])}</em>`);
 }
 
-function renderColumn({ col: colEl, hits, total, error }, otherRanks) {
+function renderColumn({ col: colEl, hits, total, error, next, pages }, otherRanks) {
   const ul = $(".results", colEl);
   let meta = $(".col-meta", colEl);
   if (!meta) { meta = document.createElement("p"); meta.className = "col-meta"; $(".col-head", colEl).appendChild(meta); }
   if (error) { ul.innerHTML = `<li class="errbox">Query failed: ${esc(error)}</li>`; meta.textContent = ""; return; }
-  meta.textContent = `${hits.length} shown · ${total ?? "?"} total matches`;
+  const dupes = hits.length - new Set(hits.map((h) => h.rowId)).size;
+  meta.textContent = `${hits.length} shown · ${total ?? "?"} total matches` +
+    (pages > 1 ? ` · ${pages} pages` : "") + (dupes ? ` · ⚠ ${dupes} rows repeated across pages` : "");
   if (!hits.length) { ul.innerHTML = `<li class="empty">No results.</li>`; return; }
 
   ul.innerHTML = hits.map((h, i) => {
@@ -495,7 +658,7 @@ function renderColumn({ col: colEl, hits, total, error }, otherRanks) {
       <button type="button" class="hit-expand" aria-expanded="false">Show all fields ▾</button>
       ${hitDetailHtml(h, d)}
     </li>`;
-  }).join("");
+  }).join("") + (next ? `<li class="more"><button type="button" class="next-page mini-go">Next page</button></li>` : "");
 }
 
 // Every field the hit actually carries (not just the curated name/type/desc subset above)

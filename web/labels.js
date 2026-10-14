@@ -81,6 +81,14 @@ export const LEVER_HELP = {
   tieBreaker: "0–1. Blends in score from the non-best matching fields instead of only counting the single best field.",
   caseInsensitive: "Ignore letter case when matching. Term/prefix/wildcard are exact-value matches by default, so “Syn123” won’t match “syn123” unless this is on.",
   useBoosts: "Apply the field-boost weights below to this column's query. Off by default — flip it on to layer boosts in and compare against the unweighted result.",
+  semanticCutoff: "How the semantic clause picks candidates. Top-k: the k nearest rows by meaning, always k of them. Min. similarity: every row at or above an absolute similarity floor, and nothing else — so a query about nothing in the index returns nothing. The two are mutually exclusive.",
+  semanticCutoffValue: "The value for the cutoff on the left — a row count for top-k (defaults to results-per-side), or a 0–1 similarity floor for min. similarity (0.5 is a reasonable start; the higher it goes the less junk and the more near-misses it drops).",
+  keywordType: "The keyword half of a hybrid search — any keyword search type, built exactly as it is on its own, with that type's levers. Its score is blended with the semantic half's.",
+  normalization: "How each half's scores are rescaled onto one scale before they're blended. min_max: 0–1 against this result set's own best and worst (tolerates BM25's outliers). l2: divide by the vector length of the scores. z_score: distance from the mean in standard deviations.",
+  combination: "How the two rescaled scores are blended into one, using the semantic weight. Arithmetic mean: weighted average. Harmonic / geometric mean: favor rows that score well on both halves over rows that score high on only one.",
+  pipelineSource: "Where the score-blending pipeline comes from. Inline: built from the levers below and sent with the query. Saved pipeline: a NamedSearchPipeline referenced by name, with its own weights. Index default: none sent, so the index's SearchConfiguration default applies, else the system default (min_max, arithmetic_mean, equal weights).",
+  pipelineRef: "A saved NamedSearchPipeline's qualified name, {organizationName}-{name}. Sent as { \"$ref\": … }.",
+  semanticWeight: "0–1. How much meaning-based similarity counts toward the blended score; keyword matching gets the rest. Each side is normalized against its own candidates first, so the blend is relative to this one result set and scores aren't comparable across searches.",
 };
 
 

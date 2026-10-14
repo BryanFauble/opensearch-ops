@@ -254,8 +254,9 @@ field boosts) is documented with code line references in
 ## Interactive app (Synapse Portal Search Lab)
 
 [`web/`](web/) is a friendly **self-serve** version of the harness for business owners / SMEs that's a
-static, dependency-free browser app (no build tooling, no backend). It calls the public
-Synapse search API directly and has two modes:
+static, dependency-free browser app (no build tooling, no backend). It calls a Synapse
+search API directly — `repo-prod` by default, `repo-staging` via the **Environment** picker (below) — and has
+two modes:
 
 - **Search playground** (entry-level) — type a query and compare two ranking *recipes* (strategies)
   side by side, with per-field boost sliders. Intuitive way to show how a tuning change reorders real
@@ -265,7 +266,8 @@ Synapse search API directly and has two modes:
 
 **Works against any SearchIndex, any portal.** while nf-tools is the default, the index
 picker is **populated by listing every SearchIndex in the collection project**
-(`syn74909065`) via `entity/children` — any portal's index is one click away. When a
+(`syn74909065`, overridable under **Connection**) via `entity/children` — any
+portal's index is one click away. When a
 non-curated index is chosen, the app discovers its columns live (`SELECT_COLUMNS`) and
 **auto-generates a field-boost config** from column type + name heuristics
 ([`web/boostgen.js`](web/boostgen.js)).
@@ -283,9 +285,79 @@ rounding.
 
 > [!NOTE]
 > Workbench optimizes **query-time** levers only (recipe, field boosts, fuzziness) and
-> reflects the index's *current* production config. Index-time config (analyzers,
-> synonyms in [`config/`](config/)) needs a Sage-admin index rebuild and isn't adjustable
-> client-side.
+> reflects the index's *current* config on whichever stack it's pointed at. Index-time
+> config (analyzers, synonyms in [`config/`](config/)) needs a Sage-admin index rebuild and
+> isn't adjustable client-side.
+
+### Environment and Connection
+
+The **Environment** picker at the top of the page switches every call between `repo-prod`
+(the default) and `repo-staging`; a **Staging** badge shows while staging is picked. Staging
+reads the same data as prod, so the same project and curated golden sets load on both.
+Hybrid and semantic search are only live on staging, so the **Semantic (vector)** search
+types (below) are only offered there.
+
+The collapsed **Connection** panel holds the rest, for whichever environment is picked. Both
+persist to `localStorage` (nothing is written to disk, and the token is only ever sent as an
+`Authorization: Bearer` header to that environment's repo API):
+
+| Field | Purpose |
+|---|---|
+| SearchIndex project | The synID whose children populate the index picker. Blank = `syn74909065`. |
+| Access token | A personal access token / JWT. Needed for private indexes; the portal indexes are public, so it's optional. |
+
+Changing the environment, or **Apply & reload**, saves and reloads (every listing, discovered
+schema and result on the page belongs to the previous environment); **Clear** empties the
+project and token.
+
+### Semantic (vector) search
+
+On staging, two extra search types appear under **Semantic (vector)**, both of which go out as a
+`hybrid` query with an inline `search_pipeline` (a `neural` clause is only accepted inside
+`hybrid.queries`):
+
+- **Semantic — vector similarity** — one `neural` clause against the index's `semantic_search`
+  vector field; the platform embeds your query text with its own model.
+  Its pipeline stays at `min_max` / `arithmetic_mean` — with one clause, normalization changes
+  the score values, not the order.
+- **Hybrid — keyword + semantic** — that clause blended with a keyword leg. *Keyword leg type*
+  picks any keyword search type (default *Multi-match — best field*), built exactly as it is
+  on its own and using that type's levers. The inline pipeline is set by *Normalization*
+  (`min_max` / `l2` / `z_score`), *Combination* (`arithmetic_mean` / `harmonic_mean` /
+  `geometric_mean`) and *Semantic weight* (default `0.5`), which splits the two legs.
+  After `z_score`, OpenSearch accepts only `arithmetic_mean`, so the other two are disabled.
+
+*Semantic cutoff* picks top-k nearest vs a minimum similarity floor (`k`, `min_score` and
+`max_distance` are mutually exclusive, so exactly one is ever sent).
+
+*Search pipeline* picks where the blending pipeline comes from: *Inline* (built from the levers
+above), *Saved pipeline ($ref)* — a NamedSearchPipeline by its `{organizationName}-{name}`, sent
+as `{"$ref": …}` with its own weights — or *Index default*, which sends none so the index's
+SearchConfiguration default applies, else the system default.
+
+An index only carries vectors if at least one of its columns was flagged `semantic: true` on
+a `ColumnAnalyzerOverrideEntry` when it was built — there's no endpoint to check that
+client-side. Against an index without vectors the backend drops a hybrid's semantic leg and
+runs the keyword leg alone; a semantic-only search is refused, and its 400 reason shows in the
+error banner. This is an in-development API; it is not on repo-prod yet (which answers
+`JSON Element in Entity is Unsupported: hybrid`), so these types are hidden there.
+
+### Lucene syntax, Match all, and paging
+
+Also staging-only: **Lucene syntax (query_string)** — strict `AND`/`OR`/`NOT`, grouping and
+`column:value` prefixes, with the same operator / min-should-match / boost levers as
+*Google-style*. **Match all** returns every row and ignores the query text. Any non-hybrid
+result with a `nextSearchAfter` cursor gets a **Next page** button that resends the query with
+`search_after` and appends the page; the meta line flags rows that repeat across pages.
+
+[`verification/`](verification/) uses these to verify the PLFM search tickets end to end — Python
+setup on staging, Playwright through this UI, and a manual runbook.
+
+The DSL shapes these build are pinned by one dependency-free check:
+
+```bash
+node web/strategies.test.mjs
+```
 
 ### Usage
 
