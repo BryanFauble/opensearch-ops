@@ -266,7 +266,7 @@ function leverRowHtml(c) {
       </label>
       <label title="${help("pipelineSource")}">Search pipeline
         <select class="lv-pipesrc">
-          <option value="inline">Inline (levers below)</option>
+          <option value="inline">Inline</option>
           <option value="ref">Saved pipeline ($ref)</option>
           <option value="default">Index default (none sent)</option>
         </select>
@@ -366,6 +366,9 @@ function applyLeverAvailability(colEl, levers) {
   show(".lv-norm", LEVER_SUPPORT.pipeline.has(levers.type) && inline);
   show(".lv-comb", LEVER_SUPPORT.pipeline.has(levers.type) && inline);
   show(".lv-semw", LEVER_SUPPORT.semanticWeight.has(levers.type) && inline);
+  // A semantic-only query has one clause, so an inline pipeline has nothing to set.
+  $(".lv-pipesrc option[value=inline]", colEl).textContent = LEVER_SUPPORT.pipeline.has(levers.type)
+    ? "Inline (normalization & weight)" : "Inline (defaults; one clause, nothing to weight)";
   const allowed = combinationsFor(levers.normalization || NORMALIZATIONS[0]);
   $$(".lv-comb option", colEl).forEach((o) => { o.disabled = !allowed.includes(o.value); });
 }
@@ -539,6 +542,11 @@ async function runColumn(c) {
   const colEl = col(c);
   const q = $(".col-q", colEl).value.trim();
   if (!q || !DATA) return;
+  if (LEVERS[c].pipelineSource === "ref" && !(LEVERS[c].pipelineRef || "").trim()) {
+    LAST_RESULT[c] = { error: "Enter a Pipeline $ref ({organizationName}-{name}), or pick another Search pipeline." };
+    renderAll();
+    return;
+  }
   const size = Math.max(1, Number($("#sizeInput").value) || 10);
   const fields = buildFields(c);
   const dsl = buildQuery(q, size, fields, LEVERS[c]);
