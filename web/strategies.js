@@ -70,9 +70,6 @@ const HYBRID_TYPES = new Set(["hybrid_semantic"]);
 
 // Every non-semantic type can be the keyword leg of a hybrid query.
 export const KEYWORD_TYPES = TYPES.filter((t) => !SEMANTIC_TYPES.has(t.key));
-// Types repo-prod doesn't accept yet (it 400s them), so they're only offered on staging.
-const STAGING_ONLY_TYPES = new Set([...SEMANTIC_TYPES, "query_string"]);
-export const PROD_TYPES = TYPES.filter((t) => !STAGING_ONLY_TYPES.has(t.key));
 
 // Where a semantic/hybrid query's search pipeline comes from: an inline literal built from
 // the levers, a saved NamedSearchPipeline by `$ref`, or none sent — the index's

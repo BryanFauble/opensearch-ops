@@ -293,9 +293,8 @@ rounding.
 
 The **Environment** picker at the top of the page switches every call between `repo-prod`
 (the default) and `repo-staging`; a **Staging** badge shows while staging is picked. Staging
-reads the same data as prod, so the same project and curated golden sets load on both.
-Hybrid and semantic search are only live on staging, so the **Semantic (vector)** search
-types (below) are only offered there.
+reads the same data as prod, so the same project and curated golden sets — and every search
+type, including **Semantic (vector)** — load on both.
 
 The collapsed **Connection** panel holds the rest, for whichever environment is picked. Both
 persist to `localStorage` (nothing is written to disk, and the token is only ever sent as an
@@ -312,7 +311,7 @@ project and token.
 
 ### Semantic (vector) search
 
-On staging, two extra search types appear under **Semantic (vector)**, both of which go out as a
+Two extra search types appear under **Semantic (vector)**, both of which go out as a
 `hybrid` query with an inline `search_pipeline` (a `neural` clause is only accepted inside
 `hybrid.queries`):
 
@@ -339,12 +338,11 @@ An index only carries vectors if at least one of its columns was flagged `semant
 a `ColumnAnalyzerOverrideEntry` when it was built — there's no endpoint to check that
 client-side. Against an index without vectors the backend drops a hybrid's semantic leg and
 runs the keyword leg alone; a semantic-only search is refused, and its 400 reason shows in the
-error banner. This is an in-development API; it is not on repo-prod yet (which answers
-`JSON Element in Entity is Unsupported: hybrid`), so these types are hidden there.
+error banner.
 
 ### Lucene syntax, Match all, and paging
 
-Also staging-only: **Lucene syntax (query_string)** — strict `AND`/`OR`/`NOT`, grouping and
+**Lucene syntax (query_string)** — strict `AND`/`OR`/`NOT`, grouping and
 `column:value` prefixes, with the same operator / min-should-match / boost levers as
 *Google-style*. **Match all** returns every row and ignores the query text. Any non-hybrid
 result with a `nextSearchAfter` cursor gets a **Next page** button that resends the query with

@@ -7,7 +7,7 @@
 
 import { search, hitDict, hitId, indexName, indexColumns, listSearchIndexes, configure } from "./synapse.js";
 import {
-  STRATEGIES, STRATEGY_ORDER, BOOSTED_KEYS, TYPES, PROD_TYPES, KEYWORD_TYPES, DEFAULT_KEYWORD_LEG, NORMALIZATIONS, COMBINATIONS,
+  STRATEGIES, STRATEGY_ORDER, BOOSTED_KEYS, TYPES, KEYWORD_TYPES, DEFAULT_KEYWORD_LEG, NORMALIZATIONS, COMBINATIONS,
   combinationsFor, LEVER_SUPPORT, keywordLeverType, buildQuery,
 } from "./strategies.js";
 import { scoreCase, aggregate } from "./score.js";
@@ -60,7 +60,6 @@ const loadConn = () => {
   try { return JSON.parse(localStorage.getItem(CONN_KEY)) || {}; } catch { return {}; }
 };
 const CONN = loadConn();  // { env, project, token }
-// Hybrid / semantic search is only live on staging, so only staging offers it.
 const STAGING = CONN.env === "staging";
 const project = () => CONN.project || DEFAULT_PROJECT;
 const saveConn = (conn) => { localStorage.setItem(CONN_KEY, JSON.stringify(conn)); location.reload(); };
@@ -219,7 +218,7 @@ function setupTabs() {
 
 // ---------------------------------------------------------------- playground columns
 // Types as <optgroup>s for a <select>, in TYPES order — multi-field recipes first, then
-// semantic (staging only), then the two single-field families (match-family text queries,
+// semantic, then the two single-field families (match-family text queries,
 // then term-level exact/pattern queries).
 function typeOptionsHtml(types) {
   const byGroup = new Map();
@@ -234,7 +233,7 @@ function leverRowHtml(c) {
   return `
     <div class="lever-grid">
       <label title="${help("type")}">Search type
-        <select class="lv-type">${typeOptionsHtml(STAGING ? TYPES : PROD_TYPES)}</select>
+        <select class="lv-type">${typeOptionsHtml(TYPES)}</select>
       </label>
       <label title="${help("keywordType")}">Keyword leg type
         <select class="lv-kwtype">${typeOptionsHtml(KEYWORD_TYPES)}</select>
